@@ -14,6 +14,7 @@ func RegisterModelStatusRoutes(r *gin.RouterGroup) {
 	{
 		g.GET("/time-windows", GetTimeWindows)
 		g.GET("/models", GetAvailableModels)
+		g.GET("/channels/performance", GetChannelPerformanceSummaries)
 		g.GET("/status/:model_name", GetSingleModelStatus)
 		g.POST("/status/multiple", GetMultipleModelsStatusHandler)
 		g.POST("/status/batch", GetMultipleModelsStatusHandler)
@@ -57,6 +58,7 @@ func RegisterModelStatusEmbedRoutes(r *gin.Engine) {
 	{
 		g.GET("/time-windows", GetTimeWindows)
 		g.GET("/models", GetAvailableModels)
+		g.GET("/channels/performance", GetChannelPerformanceSummaries)
 		g.GET("/status/:model_name", GetSingleModelStatus)
 		g.POST("/status/multiple", GetMultipleModelsStatusHandler)
 		g.POST("/status/batch", GetMultipleModelsStatusHandler)
@@ -71,6 +73,7 @@ func RegisterModelStatusEmbedRoutes(r *gin.Engine) {
 	{
 		e.GET("/time-windows", GetTimeWindows)
 		e.GET("/models", GetAvailableModels)
+		e.GET("/channels/performance", GetChannelPerformanceSummaries)
 		e.GET("/status/:model_name", GetSingleModelStatus)
 		e.POST("/status/multiple", GetMultipleModelsStatusHandler)
 		e.POST("/status/batch", GetMultipleModelsStatusHandler)
@@ -99,6 +102,24 @@ func GetAvailableModels(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": data})
+}
+
+// GET /channels/performance
+func GetChannelPerformanceSummaries(c *gin.Context) {
+	window := c.DefaultQuery("window", service.DefaultTimeWindow)
+
+	svc := service.NewModelStatusService()
+	data, err := svc.GetChannelPerformanceSummaries(window)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResp("QUERY_ERROR", err.Error(), ""))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success":     true,
+		"data":        data,
+		"time_window": window,
+		"cache_ttl":   60,
+	})
 }
 
 // GET /status/:model_name

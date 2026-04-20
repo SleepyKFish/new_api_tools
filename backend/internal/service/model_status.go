@@ -3,6 +3,7 @@ package service
 import (
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/new-api-tools/backend/internal/cache"
@@ -62,6 +63,29 @@ func roundRate(rate float64) float64 {
 	return math.Round(rate*100) / 100
 }
 
+func buildPerformanceSummary(totalRequests, timedRequests, outputRequests, within5s, within10s, completionTokensSum, useTimeSum int64) map[string]interface{} {
+	var within5sRate interface{}
+	var within10sRate interface{}
+	var completionTPS interface{}
+
+	if timedRequests > 0 {
+		within5sRate = roundRate(float64(within5s) / float64(timedRequests) * 100)
+		within10sRate = roundRate(float64(within10s) / float64(timedRequests) * 100)
+	}
+	if useTimeSum > 0 {
+		completionTPS = roundRate(float64(completionTokensSum) / float64(useTimeSum))
+	}
+
+	return map[string]interface{}{
+		"total_requests":   totalRequests,
+		"within_5s_rate":   within5sRate,
+		"within_10s_rate":  within10sRate,
+		"completion_tps":   completionTPS,
+		"timed_requests":   timedRequests,
+		"output_requests":  outputRequests,
+	}
+}
+
 // ModelStatusService handles model availability monitoring
 type ModelStatusService struct {
 	db *database.Manager
@@ -70,6 +94,136 @@ type ModelStatusService struct {
 // NewModelStatusService creates a new ModelStatusService
 func NewModelStatusService() *ModelStatusService {
 	return &ModelStatusService{db: database.Get()}
+}
+
+func (s *ModelStatusService) getModelPerformanceMap(modelNames []string, startTime, now int64) map[string]map[string]interface{} {
+	result := make(map[string]map[string]interface{})
+	if len(modelNames) == 0 {
+		return result
+	}
+
+	placeholders := make([]string, 0, len(modelNames))
+	args := make([]interface{}, 0, len(modelNames)+2)
+	for i, modelName := range modelNames {
+		placeholders = append(placeholders, s.db.Placeholder(i+1))
+		args = append(args, modelName)
+	}
+	args = append(args, startTime, now)
+
+	query := fmt.Sprintf(`
+		SELECT
+			model_name,
+			SUM(CASE WHEN type = 2 THEN 1 ELSE 0 END) as success_requests,
+			SUM(CASE WHEN type = 2 AND use_time > 0 THEN 1 ELSE 0 END) as timed_requests,
+			SUM(CASE WHEN type = 2 AND use_time > 0 AND use_time <= 5 THEN 1 ELSE 0 END) as within_5s,
+			SUM(CASE WHEN type = 2 AND use_time > 0 AND use_time <= 10 THEN 1 ELSE 0 END) as within_10s,
+			SUM(CASE WHEN type = 2 AND completion_tokens > 0 AND use_time > 0 THEN 1 ELSE 0 END) as output_requests,
+			COALESCE(SUM(CASE WHEN type = 2 AND completion_tokens > 0 AND use_time > 0 THEN completion_tokens ELSE 0 END), 0) as completion_tokens_sum,
+			COALESCE(SUM(CASE WHEN type = 2 AND completion_tokens > 0 AND use_time > 0 THEN use_time ELSE 0 END), 0) as use_time_sum
+		FROM logs
+		WHERE model_name IN (%s)
+			AND created_at >= %s AND created_at < %s
+			AND type IN (2, 5)
+		GROUP BY model_name`,
+		strings.Join(placeholders, ", "),
+		s.db.Placeholder(len(modelNames)+1),
+		s.db.Placeholder(len(modelNames)+2),
+	)
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return result
+	}
+
+	for _, row := range rows {
+		modelName := toString(row["model_name"])
+		if modelName == "" {
+			continue
+		}
+		result[modelName] = buildPerformanceSummary(
+			toInt64(row["success_requests"]),
+			toInt64(row["timed_requests"]),
+			toInt64(row["output_requests"]),
+			toInt64(row["within_5s"]),
+			toInt64(row["within_10s"]),
+			toInt64(row["completion_tokens_sum"]),
+			toInt64(row["use_time_sum"]),
+		)
+	}
+
+	return result
+}
+
+func (s *ModelStatusService) GetChannelPerformanceSummaries(window string) ([]map[string]interface{}, error) {
+	cacheKey := fmt.Sprintf("model_status:channel_performance:%s", window)
+	cm := cache.Get()
+	var cached []map[string]interface{}
+	found, _ := cm.GetJSON(cacheKey, &cached)
+	if found {
+		return cached, nil
+	}
+
+	twConfig, ok := timeWindowConfigs[window]
+	if !ok {
+		twConfig = timeWindowConfigs["24h"]
+	}
+
+	now := time.Now().Unix()
+	startTime := now - twConfig.totalSeconds
+
+	query := s.db.RebindQuery(`
+		SELECT
+			c.id as channel_id,
+			COALESCE(c.name, '') as channel_name,
+			SUM(CASE WHEN l.type = 2 THEN 1 ELSE 0 END) as success_requests,
+			SUM(CASE WHEN l.type = 2 AND l.use_time > 0 THEN 1 ELSE 0 END) as timed_requests,
+			SUM(CASE WHEN l.type = 2 AND l.use_time > 0 AND l.use_time <= 5 THEN 1 ELSE 0 END) as within_5s,
+			SUM(CASE WHEN l.type = 2 AND l.use_time > 0 AND l.use_time <= 10 THEN 1 ELSE 0 END) as within_10s,
+			SUM(CASE WHEN l.type = 2 AND l.completion_tokens > 0 AND l.use_time > 0 THEN 1 ELSE 0 END) as output_requests,
+			COALESCE(SUM(CASE WHEN l.type = 2 AND l.completion_tokens > 0 AND l.use_time > 0 THEN l.completion_tokens ELSE 0 END), 0) as completion_tokens_sum,
+			COALESCE(SUM(CASE WHEN l.type = 2 AND l.completion_tokens > 0 AND l.use_time > 0 THEN l.use_time ELSE 0 END), 0) as use_time_sum
+		FROM logs l
+		INNER JOIN channels c ON c.id = l.channel_id
+		WHERE l.created_at >= ? AND l.created_at < ?
+			AND l.type IN (2, 5)
+		GROUP BY c.id, c.name
+		HAVING SUM(CASE WHEN l.type = 2 THEN 1 ELSE 0 END) > 0
+		ORDER BY success_requests DESC, channel_id ASC`)
+
+	rows, err := s.db.Query(query, startTime, now)
+	if err != nil {
+		return nil, err
+	}
+
+	results := make([]map[string]interface{}, 0, len(rows))
+	for _, row := range rows {
+		perf := buildPerformanceSummary(
+			toInt64(row["success_requests"]),
+			toInt64(row["timed_requests"]),
+			toInt64(row["output_requests"]),
+			toInt64(row["within_5s"]),
+			toInt64(row["within_10s"]),
+			toInt64(row["completion_tokens_sum"]),
+			toInt64(row["use_time_sum"]),
+		)
+		channelName := toString(row["channel_name"])
+		if channelName == "" {
+			channelName = fmt.Sprintf("Channel#%d", toInt64(row["channel_id"]))
+		}
+		results = append(results, map[string]interface{}{
+			"channel_id":      toInt64(row["channel_id"]),
+			"channel_name":    channelName,
+			"total_requests":  perf["total_requests"],
+			"within_5s_rate":  perf["within_5s_rate"],
+			"within_10s_rate": perf["within_10s_rate"],
+			"completion_tps":  perf["completion_tps"],
+			"timed_requests":  perf["timed_requests"],
+			"output_requests": perf["output_requests"],
+		})
+	}
+
+	cm.Set(cacheKey, results, 30*time.Second)
+	return results, nil
 }
 
 // GetAvailableModels returns all models with 24h request counts
@@ -220,6 +374,8 @@ func (s *ModelStatusService) GetModelStatus(modelName, window string) (map[strin
 		overallRate = float64(totalSuccess) / float64(totalReqs) * 100
 	}
 
+	perf := s.getModelPerformanceMap([]string{modelName}, startTime, now)[modelName]
+
 	result := map[string]interface{}{
 		"model_name":     modelName,
 		"display_name":   modelName,
@@ -230,6 +386,11 @@ func (s *ModelStatusService) GetModelStatus(modelName, window string) (map[strin
 		"empty_count":    totalEmpty,
 		"success_rate":   roundRate(overallRate),
 		"current_status": getStatusColor(overallRate, totalReqs),
+		"within_5s_rate": perf["within_5s_rate"],
+		"within_10s_rate": perf["within_10s_rate"],
+		"completion_tps": perf["completion_tps"],
+		"timed_requests": perf["timed_requests"],
+		"output_requests": perf["output_requests"],
 		"slot_data":      slotData,
 	}
 
@@ -240,10 +401,24 @@ func (s *ModelStatusService) GetModelStatus(modelName, window string) (map[strin
 // GetMultipleModelsStatus returns status for multiple models
 func (s *ModelStatusService) GetMultipleModelsStatus(modelNames []string, window string) ([]map[string]interface{}, error) {
 	results := make([]map[string]interface{}, 0, len(modelNames))
+	twConfig, ok := timeWindowConfigs[window]
+	if !ok {
+		twConfig = timeWindowConfigs["24h"]
+	}
+	now := time.Now().Unix()
+	startTime := now - twConfig.totalSeconds
+	perfMap := s.getModelPerformanceMap(modelNames, startTime, now)
 	for _, name := range modelNames {
 		status, err := s.GetModelStatus(name, window)
 		if err != nil {
 			continue
+		}
+		if perf, ok := perfMap[name]; ok {
+			status["within_5s_rate"] = perf["within_5s_rate"]
+			status["within_10s_rate"] = perf["within_10s_rate"]
+			status["completion_tps"] = perf["completion_tps"]
+			status["timed_requests"] = perf["timed_requests"]
+			status["output_requests"] = perf["output_requests"]
 		}
 		results = append(results, status)
 	}
