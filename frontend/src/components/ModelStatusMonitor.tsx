@@ -35,7 +35,23 @@ interface ModelStatus {
   success_count: number
   success_rate: number
   current_status: 'green' | 'yellow' | 'red'
+  within_5s_rate: number | null
+  within_10s_rate: number | null
+  completion_tps: number | null
+  timed_requests: number
+  output_requests: number
   slot_data: SlotStatus[]
+}
+
+interface ChannelPerformance {
+  channel_id: number
+  channel_name: string
+  total_requests: number
+  within_5s_rate: number | null
+  within_10s_rate: number | null
+  completion_tps: number | null
+  timed_requests: number
+  output_requests: number
 }
 
 interface ModelStatusMonitorProps {
@@ -294,6 +310,14 @@ function formatCountdown(seconds: number): string {
   return mins > 0 ? `${mins}:${secs.toString().padStart(2, '0')}` : `${secs}s`
 }
 
+function formatRate(value: number | null): string {
+  return value == null ? '--' : `${value.toFixed(1)}%`
+}
+
+function formatTps(value: number | null): string {
+  return value == null ? '--' : `${value.toFixed(2)} tok/s`
+}
+
 const REFRESH_INTERVALS = [
   { value: 0, label: '关闭' },
   { value: 30, label: '30秒' },
@@ -330,6 +354,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
   const [availableModels, setAvailableModels] = useState<ModelWithStats[]>([])
   const [selectedModels, setSelectedModels] = useState<string[]>([])
   const [modelStatuses, setModelStatuses] = useState<ModelStatus[]>([])
+  const [channelSummaries, setChannelSummaries] = useState<ChannelPerformance[]>([])
   const [loading, setLoading] = useState(true)
   const [initialLoading, setInitialLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
@@ -651,6 +676,24 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
     }
   }, [apiUrl, getApiPrefix, getAuthHeaders, selectedModels, timeWindow, isEmbed, showToast])
 
+  const fetchChannelSummaries = useCallback(async (forceRefresh = false) => {
+    try {
+      const cacheParam = forceRefresh ? '&no_cache=true' : ''
+      const response = await fetch(`${apiUrl}${getApiPrefix()}/channels/performance?window=${timeWindow}${cacheParam}`, {
+        headers: getAuthHeaders(),
+      })
+      const data = await response.json()
+      if (data.success) {
+        setChannelSummaries(data.data)
+      }
+    } catch (error) {
+      console.error('Failed to fetch channel summaries:', error)
+      if (!isEmbed) {
+        showToast('error', '获取渠道性能失败')
+      }
+    }
+  }, [apiUrl, getApiPrefix, getAuthHeaders, timeWindow, isEmbed, showToast])
+
   // Initial load
   useEffect(() => {
     fetchAvailableModels()
@@ -669,6 +712,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
       prevSelectedModels.current = selectedModels
       prevTimeWindow.current = timeWindow
       fetchModelStatuses(false)  // Use cache on initial load
+      fetchChannelSummaries(false)
       return
     }
 
@@ -689,7 +733,10 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
       // Only time window changed - can use cache (pre-warmed)
       fetchModelStatuses(false)
     }
-  }, [selectedModels, timeWindow, fetchModelStatuses])
+    if (windowChanged) {
+      fetchChannelSummaries(false)
+    }
+  }, [selectedModels, timeWindow, fetchModelStatuses, fetchChannelSummaries])
 
   // Auto refresh countdown
   useEffect(() => {
@@ -700,6 +747,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
         if (prev <= 1) {
           // Auto refresh should also get fresh data
           fetchModelStatuses(true)
+          fetchChannelSummaries(true)
           return refreshIntervalRef.current
         }
         return prev - 1
@@ -707,7 +755,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
     }, 1000)
 
     return () => clearInterval(timer)
-  }, [refreshInterval, fetchModelStatuses])
+  }, [refreshInterval, fetchModelStatuses, fetchChannelSummaries])
 
   // Reset countdown when interval changes
   useEffect(() => {
@@ -717,6 +765,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
   const handleRefresh = () => {
     setCountdown(refreshIntervalRef.current)
     fetchModelStatuses(true)
+    fetchChannelSummaries(true)
   }
 
   // DnD sensors
@@ -769,6 +818,11 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
     if (active.length === 0) return 0
     return +(active.reduce((sum, m) => sum + m.success_rate, 0) / active.length).toFixed(1)
   }, [modelStatuses])
+
+  const activeChannelSummaries = useMemo(
+    () => channelSummaries.filter(channel => channel.total_requests > 0),
+    [channelSummaries]
+  )
 
   // Handle group filter change
   const handleGroupFilterChange = useCallback((gid: string) => {
@@ -1388,6 +1442,54 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
       {/* Embed Help Modal */}
       {showEmbedHelp && (
         <EmbedHelpModal onClose={() => setShowEmbedHelp(false)} />
+      )}
+
+      {/* Channel Performance Summary */}
+      {activeChannelSummaries.length > 0 && (
+        <Card className="overflow-hidden border-0 shadow-sm">
+          <CardContent className="p-4">
+            <div className="flex items-center justify-between gap-3 mb-3">
+              <div>
+                <h3 className="text-sm font-semibold tracking-tight">渠道性能摘要</h3>
+                <p className="text-xs text-muted-foreground mt-1">
+                  基于成功请求统计 5 秒内、10 秒内返回比例与输出速度
+                </p>
+              </div>
+              <Badge variant="outline" className="font-normal">
+                {activeChannelSummaries.length} 个渠道
+              </Badge>
+            </div>
+
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+              {activeChannelSummaries.map((channel) => (
+                <Card key={channel.channel_id} className="border border-border/60 shadow-none">
+                  <CardContent className="p-3.5">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-sm font-medium truncate" title={channel.channel_name}>
+                          {channel.channel_name}
+                        </div>
+                        <div className="text-[11px] text-muted-foreground mt-1">
+                          渠道 #{channel.channel_id} · 请求 {channel.total_requests.toLocaleString()}
+                        </div>
+                      </div>
+                      <div className="text-right text-[11px] text-muted-foreground">
+                        <div>计时样本 {channel.timed_requests.toLocaleString()}</div>
+                        <div>输出样本 {channel.output_requests.toLocaleString()}</div>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-2 mt-3">
+                      <MetricPill label="5s内返回" value={formatRate(channel.within_5s_rate)} tone="emerald" />
+                      <MetricPill label="10s内返回" value={formatRate(channel.within_10s_rate)} tone="blue" />
+                      <MetricPill label="输出速度" value={formatTps(channel.completion_tps)} tone="amber" />
+                    </div>
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
       )}
 
       {/* Group Filter + Status Filter */}
@@ -2220,6 +2322,29 @@ function EmbedHelpModal({ onClose }: { onClose: () => void }) {
   )
 }
 
+function MetricPill({
+  label,
+  value,
+  tone,
+}: {
+  label: string
+  value: string
+  tone: 'emerald' | 'blue' | 'amber'
+}) {
+  const toneClass = tone === 'emerald'
+    ? 'from-emerald-500/10 to-emerald-500/5 border-emerald-500/20'
+    : tone === 'blue'
+      ? 'from-blue-500/10 to-blue-500/5 border-blue-500/20'
+      : 'from-amber-500/10 to-amber-500/5 border-amber-500/20'
+
+  return (
+    <div className={cn("rounded-lg border bg-gradient-to-br px-3 py-2", toneClass)}>
+      <div className="text-[11px] text-muted-foreground">{label}</div>
+      <div className="text-sm font-semibold tabular-nums mt-1">{value}</div>
+    </div>
+  )
+}
+
 function ModelStatusCard({ model, dragHandleProps }: ModelStatusCardProps) {
   const [hoveredSlot, setHoveredSlot] = useState<SlotStatus | null>(null)
   const [tooltipPosition, setTooltipPosition] = useState({ x: 0, y: 0 })
@@ -2297,6 +2422,12 @@ function ModelStatusCard({ model, dragHandleProps }: ModelStatusCardProps) {
             <span className="mx-1 text-muted-foreground/40">·</span>
             <span>{model.total_requests.toLocaleString()}</span>
           </div>
+        </div>
+
+        <div className="grid grid-cols-3 gap-2 mb-3">
+          <MetricPill label="5s内返回" value={formatRate(model.within_5s_rate)} tone="emerald" />
+          <MetricPill label="10s内返回" value={formatRate(model.within_10s_rate)} tone="blue" />
+          <MetricPill label="输出速度" value={formatTps(model.completion_tps)} tone="amber" />
         </div>
 
         {/* Status grid - compact with rounded ends and staggered animation */}

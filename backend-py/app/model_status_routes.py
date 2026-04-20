@@ -8,7 +8,14 @@ from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 
 from .auth import verify_auth
-from .model_status_service import get_model_status_service, SlotStatus, ModelStatus, TIME_WINDOWS, DEFAULT_TIME_WINDOW
+from .model_status_service import (
+    get_model_status_service,
+    SlotStatus,
+    ModelStatus,
+    ChannelPerformanceSummary,
+    TIME_WINDOWS,
+    DEFAULT_TIME_WINDOW,
+)
 from .logger import logger
 
 router = APIRouter(prefix="/api/model-status", tags=["Model Status"])
@@ -58,7 +65,24 @@ class ModelStatusItem(BaseModel):
     success_count: int
     success_rate: float
     current_status: str
+    within_5s_rate: Optional[float] = None
+    within_10s_rate: Optional[float] = None
+    completion_tps: Optional[float] = None
+    timed_requests: int = 0
+    output_requests: int = 0
     slot_data: List[SlotStatusItem]
+
+
+class ChannelPerformanceItem(BaseModel):
+    """Channel performance summary item."""
+    channel_id: int
+    channel_name: str
+    total_requests: int
+    within_5s_rate: Optional[float] = None
+    within_10s_rate: Optional[float] = None
+    completion_tps: Optional[float] = None
+    timed_requests: int = 0
+    output_requests: int = 0
 
 
 class AvailableModelsResponse(BaseModel):
@@ -101,6 +125,14 @@ class MultipleModelsStatusResponse(BaseModel):
     cache_ttl: int = 60  # Cache TTL in seconds for frontend
 
 
+class ChannelPerformanceResponse(BaseModel):
+    """Response for channel performance summaries."""
+    success: bool
+    data: List[ChannelPerformanceItem]
+    time_window: str
+    cache_ttl: int = 60
+
+
 class SelectedModelsRequest(BaseModel):
     """Request for updating selected models."""
     models: List[str]
@@ -135,6 +167,11 @@ def model_status_to_item(status: ModelStatus) -> ModelStatusItem:
         success_count=status.success_count,
         success_rate=status.success_rate,
         current_status=status.current_status,
+        within_5s_rate=status.within_5s_rate,
+        within_10s_rate=status.within_10s_rate,
+        completion_tps=status.completion_tps,
+        timed_requests=status.timed_requests,
+        output_requests=status.output_requests,
         slot_data=[
             SlotStatusItem(
                 slot=s.slot,
@@ -147,6 +184,20 @@ def model_status_to_item(status: ModelStatus) -> ModelStatusItem:
             )
             for s in status.slot_data
         ],
+    )
+
+
+def channel_performance_to_item(summary: ChannelPerformanceSummary) -> ChannelPerformanceItem:
+    """Convert ChannelPerformanceSummary to response model."""
+    return ChannelPerformanceItem(
+        channel_id=summary.channel_id,
+        channel_name=summary.channel_name,
+        total_requests=summary.total_requests,
+        within_5s_rate=summary.within_5s_rate,
+        within_10s_rate=summary.within_10s_rate,
+        completion_tps=summary.completion_tps,
+        timed_requests=summary.timed_requests,
+        output_requests=summary.output_requests,
     )
 
 
@@ -246,6 +297,26 @@ async def get_all_models_status(
     )
 
 
+@router.get("/channels/performance", response_model=ChannelPerformanceResponse)
+async def get_channel_performance(
+    window: str = Query(DEFAULT_TIME_WINDOW, description="Time window: 1h, 6h, 12h, 24h"),
+    no_cache: bool = Query(False, description="Skip cache and fetch fresh data"),
+    _: str = Depends(verify_auth),
+):
+    """
+    Get performance summaries for channels within a time window.
+    """
+    service = get_model_status_service()
+    channels = service.get_channel_performance_summaries(window, use_cache=not no_cache)
+
+    return ChannelPerformanceResponse(
+        success=True,
+        data=[channel_performance_to_item(c) for c in channels],
+        time_window=window,
+        cache_ttl=60,
+    )
+
+
 # ==================== Public Embed Endpoints (No Auth) ====================
 
 @router.get("/embed/windows", response_model=TimeWindowsResponse)
@@ -337,6 +408,25 @@ async def get_embed_all_models_status(
     return MultipleModelsStatusResponse(
         success=True,
         data=[model_status_to_item(s) for s in statuses],
+        time_window=window,
+        cache_ttl=60,
+    )
+
+
+@router.get("/embed/channels/performance", response_model=ChannelPerformanceResponse)
+async def get_embed_channel_performance(
+    window: str = Query(DEFAULT_TIME_WINDOW, description="Time window: 1h, 6h, 12h, 24h"),
+):
+    """
+    [Public] Get channel performance summaries within a time window.
+    Always uses cache for embed access.
+    """
+    service = get_model_status_service()
+    channels = service.get_channel_performance_summaries(window, use_cache=True)
+
+    return ChannelPerformanceResponse(
+        success=True,
+        data=[channel_performance_to_item(c) for c in channels],
         time_window=window,
         cache_ttl=60,
     )

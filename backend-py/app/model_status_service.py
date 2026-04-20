@@ -3,7 +3,7 @@ Model Status Monitoring Service for NewAPI Middleware Tool.
 Provides sliding window status monitoring based on log data.
 """
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
 
@@ -54,7 +54,25 @@ class ModelStatus:
     success_count: int
     success_rate: float
     current_status: str  # 'green', 'yellow', 'red'
-    slot_data: List[SlotStatus]
+    within_5s_rate: Optional[float] = None
+    within_10s_rate: Optional[float] = None
+    completion_tps: Optional[float] = None
+    timed_requests: int = 0
+    output_requests: int = 0
+    slot_data: List[SlotStatus] = field(default_factory=list)
+
+
+@dataclass
+class ChannelPerformanceSummary:
+    """Performance summary for a channel within a time window."""
+    channel_id: int
+    channel_name: str
+    total_requests: int
+    within_5s_rate: Optional[float]
+    within_10s_rate: Optional[float]
+    completion_tps: Optional[float]
+    timed_requests: int
+    output_requests: int
 
 
 def get_status_color(success_rate: float, total_requests: int) -> str:
@@ -147,6 +165,168 @@ class ModelStatusService:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM model_status_cache WHERE expires_at < ?", (now,))
             conn.commit()
+
+    def _build_performance_summary(
+        self,
+        total_requests: int,
+        timed_requests: int,
+        output_requests: int,
+        within_5s: int,
+        within_10s: int,
+        total_completion_tokens: float,
+        total_use_time: float,
+    ) -> Dict[str, Any]:
+        """Convert raw aggregates into frontend-friendly performance metrics."""
+        within_5s_rate = round(within_5s / timed_requests * 100, 2) if timed_requests > 0 else None
+        within_10s_rate = round(within_10s / timed_requests * 100, 2) if timed_requests > 0 else None
+        completion_tps = round(total_completion_tokens / total_use_time, 2) if total_use_time > 0 else None
+        return {
+            "total_requests": total_requests,
+            "within_5s_rate": within_5s_rate,
+            "within_10s_rate": within_10s_rate,
+            "completion_tps": completion_tps,
+            "timed_requests": timed_requests,
+            "output_requests": output_requests,
+        }
+
+    def _get_model_performance_map(
+        self,
+        model_names: List[str],
+        window_start: int,
+        now: int,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Get summary performance metrics for a batch of models."""
+        if not model_names:
+            return {}
+
+        model_placeholders = ", ".join([f":perf_model_{i}" for i in range(len(model_names))])
+        sql = f"""
+            SELECT
+                model_name,
+                SUM(CASE WHEN type = :type_success THEN 1 ELSE 0 END) as success_requests,
+                SUM(CASE WHEN type = :type_success AND use_time > 0 THEN 1 ELSE 0 END) as timed_requests,
+                SUM(CASE WHEN type = :type_success AND use_time > 0 AND use_time <= 5 THEN 1 ELSE 0 END) as within_5s,
+                SUM(CASE WHEN type = :type_success AND use_time > 0 AND use_time <= 10 THEN 1 ELSE 0 END) as within_10s,
+                SUM(CASE WHEN type = :type_success AND completion_tokens > 0 AND use_time > 0 THEN 1 ELSE 0 END) as output_requests,
+                COALESCE(SUM(CASE WHEN type = :type_success AND completion_tokens > 0 AND use_time > 0 THEN completion_tokens ELSE 0 END), 0) as completion_tokens_sum,
+                COALESCE(SUM(CASE WHEN type = :type_success AND completion_tokens > 0 AND use_time > 0 THEN use_time ELSE 0 END), 0) as use_time_sum
+            FROM logs
+            WHERE model_name IN ({model_placeholders})
+              AND created_at >= :window_start
+              AND created_at < :now
+              AND type IN (:type_success, :type_failure)
+            GROUP BY model_name
+        """
+        params = {
+            "window_start": window_start,
+            "now": now,
+            "type_success": LOG_TYPE_CONSUMPTION,
+            "type_failure": LOG_TYPE_FAILURE,
+        }
+        for i, model_name in enumerate(model_names):
+            params[f"perf_model_{i}"] = model_name
+
+        performance_map = {}
+        try:
+            self._db.connect()
+            result = self._db.execute(sql, params)
+            for row in result:
+                model_name = row.get("model_name")
+                if not model_name:
+                    continue
+                performance_map[model_name] = self._build_performance_summary(
+                    total_requests=int(row.get("success_requests") or 0),
+                    timed_requests=int(row.get("timed_requests") or 0),
+                    output_requests=int(row.get("output_requests") or 0),
+                    within_5s=int(row.get("within_5s") or 0),
+                    within_10s=int(row.get("within_10s") or 0),
+                    total_completion_tokens=float(row.get("completion_tokens_sum") or 0),
+                    total_use_time=float(row.get("use_time_sum") or 0),
+                )
+        except Exception as e:
+            logger.db_error(f"批量获取模型性能摘要失败: {e}")
+
+        return performance_map
+
+    def get_channel_performance_summaries(
+        self,
+        time_window: str = DEFAULT_TIME_WINDOW,
+        use_cache: bool = True,
+    ) -> List[ChannelPerformanceSummary]:
+        """Get performance summaries grouped by channel."""
+        if time_window not in TIME_WINDOWS:
+            time_window = DEFAULT_TIME_WINDOW
+
+        cache_key = f"channel_performance:{time_window}"
+        if use_cache:
+            cached = self._get_cache(cache_key)
+            if cached:
+                return [ChannelPerformanceSummary(**item) for item in cached.get("channels", [])]
+
+        now = int(time.time())
+        total_seconds, _, _ = get_time_window_config(time_window)
+        window_start = now - total_seconds
+
+        sql = """
+            SELECT
+                c.id as channel_id,
+                COALESCE(c.name, '') as channel_name,
+                SUM(CASE WHEN l.type = :type_success THEN 1 ELSE 0 END) as success_requests,
+                SUM(CASE WHEN l.type = :type_success AND l.use_time > 0 THEN 1 ELSE 0 END) as timed_requests,
+                SUM(CASE WHEN l.type = :type_success AND l.use_time > 0 AND l.use_time <= 5 THEN 1 ELSE 0 END) as within_5s,
+                SUM(CASE WHEN l.type = :type_success AND l.use_time > 0 AND l.use_time <= 10 THEN 1 ELSE 0 END) as within_10s,
+                SUM(CASE WHEN l.type = :type_success AND l.completion_tokens > 0 AND l.use_time > 0 THEN 1 ELSE 0 END) as output_requests,
+                COALESCE(SUM(CASE WHEN l.type = :type_success AND l.completion_tokens > 0 AND l.use_time > 0 THEN l.completion_tokens ELSE 0 END), 0) as completion_tokens_sum,
+                COALESCE(SUM(CASE WHEN l.type = :type_success AND l.completion_tokens > 0 AND l.use_time > 0 THEN l.use_time ELSE 0 END), 0) as use_time_sum
+            FROM logs l
+            INNER JOIN channels c ON c.id = l.channel_id
+            WHERE l.created_at >= :window_start
+              AND l.created_at < :now
+              AND l.type IN (:type_success, :type_failure)
+            GROUP BY c.id, c.name
+            HAVING SUM(CASE WHEN l.type = :type_success THEN 1 ELSE 0 END) > 0
+            ORDER BY success_requests DESC, channel_id ASC
+        """
+
+        channels: List[ChannelPerformanceSummary] = []
+        try:
+            self._db.connect()
+            result = self._db.execute(sql, {
+                "window_start": window_start,
+                "now": now,
+                "type_success": LOG_TYPE_CONSUMPTION,
+                "type_failure": LOG_TYPE_FAILURE,
+            })
+            for row in result:
+                perf = self._build_performance_summary(
+                    total_requests=int(row.get("success_requests") or 0),
+                    timed_requests=int(row.get("timed_requests") or 0),
+                    output_requests=int(row.get("output_requests") or 0),
+                    within_5s=int(row.get("within_5s") or 0),
+                    within_10s=int(row.get("within_10s") or 0),
+                    total_completion_tokens=float(row.get("completion_tokens_sum") or 0),
+                    total_use_time=float(row.get("use_time_sum") or 0),
+                )
+                channels.append(ChannelPerformanceSummary(
+                    channel_id=int(row.get("channel_id") or 0),
+                    channel_name=row.get("channel_name") or f"Channel#{row.get('channel_id')}",
+                    total_requests=perf["total_requests"],
+                    within_5s_rate=perf["within_5s_rate"],
+                    within_10s_rate=perf["within_10s_rate"],
+                    completion_tps=perf["completion_tps"],
+                    timed_requests=perf["timed_requests"],
+                    output_requests=perf["output_requests"],
+                ))
+        except Exception as e:
+            logger.db_error(f"获取渠道性能摘要失败: {e}")
+            return []
+
+        self._set_cache(
+            cache_key,
+            {"channels": [asdict(channel) for channel in channels]},
+            ttl=CACHE_TTL_SHORT,
+        )
+        return channels
 
     def get_available_models(self, use_cache: bool = True) -> List[str]:
         """
@@ -348,6 +528,7 @@ class ModelStatusService:
         slot_data = []
         total_requests = 0
         total_success = 0
+        performance = self._get_model_performance_map([model_name], window_start, now).get(model_name, {})
 
         for i in range(num_slots):
             slot_info = slot_data_map[i]
@@ -380,6 +561,11 @@ class ModelStatusService:
             success_count=total_success,
             success_rate=round(overall_rate, 2),
             current_status=current_status,
+            within_5s_rate=performance.get("within_5s_rate"),
+            within_10s_rate=performance.get("within_10s_rate"),
+            completion_tps=performance.get("completion_tps"),
+            timed_requests=performance.get("timed_requests", 0),
+            output_requests=performance.get("output_requests", 0),
             slot_data=slot_data,
         )
 
@@ -498,6 +684,8 @@ class ModelStatusService:
         except Exception as e:
             logger.db_error(f"批量获取模型状态失败: {e}")
 
+        performance_map = self._get_model_performance_map(models_to_query, window_start, now)
+
         # Build ModelStatus for each model
         queried_results = {}
         for model_name in models_to_query:
@@ -536,6 +724,11 @@ class ModelStatusService:
                 success_count=total_success,
                 success_rate=round(overall_rate, 2),
                 current_status=current_status,
+                within_5s_rate=performance_map.get(model_name, {}).get("within_5s_rate"),
+                within_10s_rate=performance_map.get(model_name, {}).get("within_10s_rate"),
+                completion_tps=performance_map.get(model_name, {}).get("completion_tps"),
+                timed_requests=performance_map.get(model_name, {}).get("timed_requests", 0),
+                output_requests=performance_map.get(model_name, {}).get("output_requests", 0),
                 slot_data=slot_data,
             )
 
@@ -582,6 +775,11 @@ class ModelStatusService:
             "success_count": status.success_count,
             "success_rate": status.success_rate,
             "current_status": status.current_status,
+            "within_5s_rate": status.within_5s_rate,
+            "within_10s_rate": status.within_10s_rate,
+            "completion_tps": status.completion_tps,
+            "timed_requests": status.timed_requests,
+            "output_requests": status.output_requests,
             "slot_data": [asdict(h) for h in status.slot_data],
         }
 
@@ -598,6 +796,11 @@ class ModelStatusService:
             success_count=data.get("success_count", data.get("success_count_24h", 0)),
             success_rate=data.get("success_rate", data.get("success_rate_24h", 0)),
             current_status=data["current_status"],
+            within_5s_rate=data.get("within_5s_rate"),
+            within_10s_rate=data.get("within_10s_rate"),
+            completion_tps=data.get("completion_tps"),
+            timed_requests=data.get("timed_requests", 0),
+            output_requests=data.get("output_requests", 0),
             slot_data=slot_data,
         )
 
