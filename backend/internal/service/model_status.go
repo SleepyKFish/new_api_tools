@@ -12,7 +12,7 @@ import (
 
 // Constants for model status
 var (
-	AvailableTimeWindows = []string{"1h", "6h", "12h", "24h"}
+	AvailableTimeWindows = []string{"15m", "30m", "1h", "6h", "12h", "24h"}
 	DefaultTimeWindow    = "24h"
 	AvailableThemes = []string{
 		"daylight", "obsidian", "minimal", "neon", "forest", "ocean", "terminal",
@@ -39,6 +39,8 @@ type timeWindowConfig struct {
 }
 
 var timeWindowConfigs = map[string]timeWindowConfig{
+	"15m": {900, 15, 60},     // 15 minutes, 15 slots, 1 minute each
+	"30m": {1800, 30, 60},    // 30 minutes, 30 slots, 1 minute each
 	"1h":  {3600, 60, 60},    // 1 hour, 60 slots, 1 minute each
 	"6h":  {21600, 24, 900},  // 6 hours, 24 slots, 15 minutes each
 	"12h": {43200, 24, 1800}, // 12 hours, 24 slots, 30 minutes each

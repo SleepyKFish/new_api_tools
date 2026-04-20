@@ -775,6 +775,8 @@ const STATUS_LABELS = {
 
 // Time window options
 const TIME_WINDOWS = [
+  { value: '15m', label: '15分钟' },
+  { value: '30m', label: '30分钟' },
   { value: '1h', label: '1小时' },
   { value: '6h', label: '6小时' },
   { value: '12h', label: '12小时' },
@@ -1339,6 +1341,8 @@ function EmbedModelCard({ model, theme, styles, onHover, onLeave }: EmbedModelCa
 
   const getTimeLabels = () => {
     switch (model.time_window) {
+      case '15m': return ['15分钟前', '7分钟前', '现在']
+      case '30m': return ['30分钟前', '15分钟前', '现在']
       case '1h': return ['60分钟前', '30分钟前', '现在']
       case '6h': return ['6小时前', '3小时前', '现在']
       case '12h': return ['12小时前', '6小时前', '现在']

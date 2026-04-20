@@ -23,6 +23,8 @@ CACHE_TTL_LONG = 300  # 5 minutes for warmup cache
 
 # Time window configurations: (total_seconds, num_slots, slot_seconds)
 TIME_WINDOWS = {
+    "15m": (900, 15, 60),        # 15 minutes, 15 slots, 1 minute each
+    "30m": (1800, 30, 60),       # 30 minutes, 30 slots, 1 minute each
     "1h": (3600, 60, 60),        # 1 hour, 60 slots, 1 minute each
     "6h": (21600, 24, 900),      # 6 hours, 24 slots, 15 minutes each
     "12h": (43200, 24, 1800),    # 12 hours, 24 slots, 30 minutes each
@@ -452,7 +454,7 @@ class ModelStatusService:
 
         Args:
             model_name: Name of the model to query.
-            time_window: Time window ('1h', '6h', '12h', '24h').
+            time_window: Time window ('15m', '30m', '1h', '6h', '12h', '24h').
             use_cache: Whether to use cached data.
             cache_ttl: Cache TTL in seconds (default: short TTL for active monitoring).
 
@@ -587,7 +589,7 @@ class ModelStatusService:
 
         Args:
             model_names: List of model names to query.
-            time_window: Time window ('1h', '6h', '12h', '24h').
+            time_window: Time window ('15m', '30m', '1h', '6h', '12h', '24h').
             use_cache: Whether to use cached data.
 
         Returns:
@@ -751,7 +753,7 @@ class ModelStatusService:
         Get status for all available models.
         
         Args:
-            time_window: Time window ('1h', '6h', '12h', '24h').
+            time_window: Time window ('15m', '30m', '1h', '6h', '12h', '24h').
             use_cache: Whether to use cached data.
             
         Returns:

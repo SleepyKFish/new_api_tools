@@ -261,6 +261,8 @@ const STATUS_LABELS = {
 
 // Time window options
 const TIME_WINDOWS = [
+  { value: '15m', label: '15分钟', slots: 15 },
+  { value: '30m', label: '30分钟', slots: 30 },
   { value: '1h', label: '1小时', slots: 60 },
   { value: '6h', label: '6小时', slots: 24 },
   { value: '12h', label: '12小时', slots: 24 },
@@ -2367,6 +2369,8 @@ function ModelStatusCard({ model, dragHandleProps }: ModelStatusCardProps) {
 
   const getTimeLabels = () => {
     switch (model.time_window) {
+      case '15m': return ['15m前', '7m前', '现在']
+      case '30m': return ['30m前', '15m前', '现在']
       case '1h': return ['60m前', '30m前', '现在']
       case '6h': return ['6h前', '3h前', '现在']
       case '12h': return ['12h前', '6h前', '现在']
