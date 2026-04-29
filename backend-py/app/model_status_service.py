@@ -186,7 +186,7 @@ class ModelStatusService:
         duration_timed_requests: int,
         duration_within_10s: int,
         duration_within_20s: int,
-        total_prompt_tokens: float,
+        total_cache_denominator_tokens: float,
         total_cache_tokens: float,
         total_completion_tokens: float,
         total_use_time: float,
@@ -196,7 +196,7 @@ class ModelStatusService:
         within_10s_rate = round(within_10s / timed_requests * 100, 2) if timed_requests > 0 else None
         duration_within_10s_rate = round(duration_within_10s / duration_timed_requests * 100, 2) if duration_timed_requests > 0 else None
         duration_within_20s_rate = round(duration_within_20s / duration_timed_requests * 100, 2) if duration_timed_requests > 0 else None
-        cache_hit_rate = round(total_cache_tokens / total_prompt_tokens * 100, 2) if total_prompt_tokens > 0 else None
+        cache_hit_rate = round(total_cache_tokens / total_cache_denominator_tokens * 100, 2) if total_cache_denominator_tokens > 0 else None
         completion_tps = round(total_completion_tokens / total_use_time, 2) if total_use_time > 0 else None
         return {
             "total_requests": total_requests,
@@ -304,6 +304,35 @@ class ModelStatusService:
             END
         """
 
+    def _json_text_expr(self, json_expr: str, key: str) -> str:
+        """Build a SQL expression that extracts a text value from a JSON object."""
+        if self._db.config.engine == DatabaseEngine.POSTGRESQL:
+            return f"""
+                CASE
+                    WHEN {json_expr} IS NOT NULL AND {json_expr} <> '' AND {json_expr} <> 'null'
+                    THEN CAST({json_expr} AS jsonb)->>'{key}'
+                    ELSE NULL
+                END
+            """
+        return f"""
+            CASE
+                WHEN {json_expr} IS NOT NULL AND {json_expr} <> '' AND JSON_VALID({json_expr})
+                THEN JSON_UNQUOTE(JSON_EXTRACT({json_expr}, '$.{key}'))
+                ELSE NULL
+            END
+        """
+
+    def _request_path_expr(self, other_col: str) -> str:
+        """Best-effort request path extraction from NewAPI logs.other."""
+        return "LOWER(COALESCE(" + ", ".join([
+            self._json_text_expr(other_col, "request_path"),
+            self._json_text_expr(other_col, "path"),
+            self._json_text_expr(other_col, "endpoint"),
+            self._json_text_expr(other_col, "url"),
+            self._json_text_expr(other_col, "request_url"),
+            "''",
+        ]) + "))"
+
     def _cache_tokens_sum_select(self, alias: str = "") -> str:
         """Build a cache token aggregate that is safe for older NewAPI schemas."""
         if not self._column_exists("logs", "other"):
@@ -311,19 +340,39 @@ class ModelStatusService:
 
         prefix = f"{alias}." if alias else ""
         type_col = f"{prefix}type"
-        prompt_col = f"{prefix}prompt_tokens"
         other_col = f"{prefix}other"
         cache_tokens = self._json_number_expr(other_col, "cache_tokens")
         return f"""
             COALESCE(SUM(CASE
                 WHEN {type_col} = :type_success
-                     AND {prompt_col} > 0
                      AND {other_col} IS NOT NULL
                      AND {other_col} <> ''
                      AND ({cache_tokens}) > 0
                 THEN ({cache_tokens})
                 ELSE 0
             END), 0) as cache_tokens_sum
+        """
+
+    def _cache_denominator_sum_select(self, alias: str = "") -> str:
+        """Build cache hit denominator, with Anthropic messages path adjustment."""
+        prefix = f"{alias}." if alias else ""
+        type_col = f"{prefix}type"
+        prompt_col = f"{prefix}prompt_tokens"
+        if not self._column_exists("logs", "other"):
+            return f"COALESCE(SUM(CASE WHEN {type_col} = :type_success AND {prompt_col} > 0 THEN {prompt_col} ELSE 0 END), 0) as cache_denominator_sum"
+
+        other_col = f"{prefix}other"
+        cache_tokens = self._json_number_expr(other_col, "cache_tokens")
+        request_path = self._request_path_expr(other_col)
+        return f"""
+            COALESCE(SUM(CASE
+                WHEN {type_col} = :type_success
+                THEN COALESCE({prompt_col}, 0) + CASE
+                    WHEN {request_path} LIKE '%/v1/messages%' THEN COALESCE(({cache_tokens}), 0)
+                    ELSE 0
+                END
+                ELSE 0
+            END), 0) as cache_denominator_sum
         """
 
     def _get_model_performance_map(
@@ -339,6 +388,7 @@ class ModelStatusService:
         model_placeholders = ", ".join([f":perf_model_{i}" for i in range(len(model_names))])
         first_token_time = self._first_token_time_expr()
         cache_tokens_sum_select = self._cache_tokens_sum_select()
+        cache_denominator_sum_select = self._cache_denominator_sum_select()
         sql = f"""
             SELECT
                 model_name,
@@ -350,7 +400,7 @@ class ModelStatusService:
                 SUM(CASE WHEN type = :type_success AND use_time > 0 AND use_time <= 10 THEN 1 ELSE 0 END) as duration_within_10s,
                 SUM(CASE WHEN type = :type_success AND use_time > 0 AND use_time <= 20 THEN 1 ELSE 0 END) as duration_within_20s,
                 SUM(CASE WHEN type = :type_success AND completion_tokens > 0 AND use_time > 0 THEN 1 ELSE 0 END) as output_requests,
-                COALESCE(SUM(CASE WHEN type = :type_success AND prompt_tokens > 0 THEN prompt_tokens ELSE 0 END), 0) as prompt_tokens_sum,
+                {cache_denominator_sum_select},
                 {cache_tokens_sum_select},
                 COALESCE(SUM(CASE WHEN type = :type_success AND completion_tokens > 0 AND use_time > 0 THEN completion_tokens ELSE 0 END), 0) as completion_tokens_sum,
                 COALESCE(SUM(CASE WHEN type = :type_success AND completion_tokens > 0 AND use_time > 0 THEN use_time ELSE 0 END), 0) as use_time_sum
@@ -387,7 +437,7 @@ class ModelStatusService:
                     duration_timed_requests=int(row.get("duration_timed_requests") or 0),
                     duration_within_10s=int(row.get("duration_within_10s") or 0),
                     duration_within_20s=int(row.get("duration_within_20s") or 0),
-                    total_prompt_tokens=float(row.get("prompt_tokens_sum") or 0),
+                    total_cache_denominator_tokens=float(row.get("cache_denominator_sum") or 0),
                     total_cache_tokens=float(row.get("cache_tokens_sum") or 0),
                     total_completion_tokens=float(row.get("completion_tokens_sum") or 0),
                     total_use_time=float(row.get("use_time_sum") or 0),
@@ -417,6 +467,7 @@ class ModelStatusService:
         window_start = now - total_seconds
         first_token_time = self._first_token_time_expr("l")
         cache_tokens_sum_select = self._cache_tokens_sum_select("l")
+        cache_denominator_sum_select = self._cache_denominator_sum_select("l")
 
         sql = f"""
             SELECT
@@ -430,7 +481,7 @@ class ModelStatusService:
                 SUM(CASE WHEN l.type = :type_success AND l.use_time > 0 AND l.use_time <= 10 THEN 1 ELSE 0 END) as duration_within_10s,
                 SUM(CASE WHEN l.type = :type_success AND l.use_time > 0 AND l.use_time <= 20 THEN 1 ELSE 0 END) as duration_within_20s,
                 SUM(CASE WHEN l.type = :type_success AND l.completion_tokens > 0 AND l.use_time > 0 THEN 1 ELSE 0 END) as output_requests,
-                COALESCE(SUM(CASE WHEN l.type = :type_success AND l.prompt_tokens > 0 THEN l.prompt_tokens ELSE 0 END), 0) as prompt_tokens_sum,
+                {cache_denominator_sum_select},
                 {cache_tokens_sum_select},
                 COALESCE(SUM(CASE WHEN l.type = :type_success AND l.completion_tokens > 0 AND l.use_time > 0 THEN l.completion_tokens ELSE 0 END), 0) as completion_tokens_sum,
                 COALESCE(SUM(CASE WHEN l.type = :type_success AND l.completion_tokens > 0 AND l.use_time > 0 THEN l.use_time ELSE 0 END), 0) as use_time_sum
@@ -463,7 +514,7 @@ class ModelStatusService:
                     duration_timed_requests=int(row.get("duration_timed_requests") or 0),
                     duration_within_10s=int(row.get("duration_within_10s") or 0),
                     duration_within_20s=int(row.get("duration_within_20s") or 0),
-                    total_prompt_tokens=float(row.get("prompt_tokens_sum") or 0),
+                    total_cache_denominator_tokens=float(row.get("cache_denominator_sum") or 0),
                     total_cache_tokens=float(row.get("cache_tokens_sum") or 0),
                     total_completion_tokens=float(row.get("completion_tokens_sum") or 0),
                     total_use_time=float(row.get("use_time_sum") or 0),

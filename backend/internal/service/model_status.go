@@ -65,7 +65,7 @@ func roundRate(rate float64) float64 {
 	return math.Round(rate*100) / 100
 }
 
-func buildPerformanceSummary(totalRequests, timedRequests, outputRequests, within5s, within10s, durationTimedRequests, durationWithin10s, durationWithin20s, promptTokensSum, cacheTokensSum, completionTokensSum, useTimeSum int64) map[string]interface{} {
+func buildPerformanceSummary(totalRequests, timedRequests, outputRequests, within5s, within10s, durationTimedRequests, durationWithin10s, durationWithin20s, cacheDenominatorSum, cacheTokensSum, completionTokensSum, useTimeSum int64) map[string]interface{} {
 	var within5sRate interface{}
 	var within10sRate interface{}
 	var durationWithin10sRate interface{}
@@ -81,8 +81,8 @@ func buildPerformanceSummary(totalRequests, timedRequests, outputRequests, withi
 		durationWithin10sRate = roundRate(float64(durationWithin10s) / float64(durationTimedRequests) * 100)
 		durationWithin20sRate = roundRate(float64(durationWithin20s) / float64(durationTimedRequests) * 100)
 	}
-	if promptTokensSum > 0 {
-		cacheHitRate = roundRate(float64(cacheTokensSum) / float64(promptTokensSum) * 100)
+	if cacheDenominatorSum > 0 {
+		cacheHitRate = roundRate(float64(cacheTokensSum) / float64(cacheDenominatorSum) * 100)
 	}
 	if useTimeSum > 0 {
 		completionTPS = roundRate(float64(completionTokensSum) / float64(useTimeSum))
@@ -154,6 +154,31 @@ func (s *ModelStatusService) jsonNumberExpr(jsonExpr, key string) string {
 	END`, jsonExpr, jsonExpr, jsonExpr, jsonExpr, key)
 }
 
+func (s *ModelStatusService) jsonTextExpr(jsonExpr, key string) string {
+	if s.db.IsPG {
+		return fmt.Sprintf(`CASE
+			WHEN %s IS NOT NULL AND %s <> '' AND %s <> 'null'
+			THEN CAST(%s AS jsonb)->>'%s'
+			ELSE NULL
+		END`, jsonExpr, jsonExpr, jsonExpr, jsonExpr, key)
+	}
+	return fmt.Sprintf(`CASE
+		WHEN %s IS NOT NULL AND %s <> '' AND JSON_VALID(%s)
+		THEN JSON_UNQUOTE(JSON_EXTRACT(%s, '$.%s'))
+		ELSE NULL
+	END`, jsonExpr, jsonExpr, jsonExpr, jsonExpr, key)
+}
+
+func (s *ModelStatusService) requestPathExpr(otherCol string) string {
+	keys := []string{"request_path", "path", "endpoint", "url", "request_url"}
+	parts := make([]string, 0, len(keys)+1)
+	for _, key := range keys {
+		parts = append(parts, s.jsonTextExpr(otherCol, key))
+	}
+	parts = append(parts, "''")
+	return fmt.Sprintf("LOWER(COALESCE(%s))", strings.Join(parts, ", "))
+}
+
 func (s *ModelStatusService) cacheTokensSumSelect(alias string) string {
 	if !s.db.ColumnExists("logs", "other") {
 		return "0 as cache_tokens_sum"
@@ -164,18 +189,40 @@ func (s *ModelStatusService) cacheTokensSumSelect(alias string) string {
 		prefix = alias + "."
 	}
 	typeCol := prefix + "type"
-	promptCol := prefix + "prompt_tokens"
 	otherCol := prefix + "other"
 	cacheTokensExpr := s.jsonNumberExpr(otherCol, "cache_tokens")
 	return fmt.Sprintf(`COALESCE(SUM(CASE
 		WHEN %s = 2
-			AND %s > 0
 			AND %s IS NOT NULL
 			AND %s <> ''
 			AND (%s) > 0
 		THEN (%s)
 		ELSE 0
-	END), 0) as cache_tokens_sum`, typeCol, promptCol, otherCol, otherCol, cacheTokensExpr, cacheTokensExpr)
+	END), 0) as cache_tokens_sum`, typeCol, otherCol, otherCol, cacheTokensExpr, cacheTokensExpr)
+}
+
+func (s *ModelStatusService) cacheDenominatorSumSelect(alias string) string {
+	prefix := ""
+	if alias != "" {
+		prefix = alias + "."
+	}
+	typeCol := prefix + "type"
+	promptCol := prefix + "prompt_tokens"
+	if !s.db.ColumnExists("logs", "other") {
+		return fmt.Sprintf("COALESCE(SUM(CASE WHEN %s = 2 AND %s > 0 THEN %s ELSE 0 END), 0) as cache_denominator_sum", typeCol, promptCol, promptCol)
+	}
+
+	otherCol := prefix + "other"
+	cacheTokensExpr := s.jsonNumberExpr(otherCol, "cache_tokens")
+	requestPathExpr := s.requestPathExpr(otherCol)
+	return fmt.Sprintf(`COALESCE(SUM(CASE
+		WHEN %s = 2
+		THEN COALESCE(%s, 0) + CASE
+			WHEN %s LIKE '%%/v1/messages%%' THEN COALESCE((%s), 0)
+			ELSE 0
+		END
+		ELSE 0
+	END), 0) as cache_denominator_sum`, typeCol, promptCol, requestPathExpr, cacheTokensExpr)
 }
 
 // ModelStatusService handles model availability monitoring
@@ -203,6 +250,7 @@ func (s *ModelStatusService) getModelPerformanceMap(modelNames []string, startTi
 	args = append(args, startTime, now)
 	firstTokenTime := s.firstTokenTimeExpr("")
 	cacheTokensSumSelect := s.cacheTokensSumSelect("")
+	cacheDenominatorSumSelect := s.cacheDenominatorSumSelect("")
 
 	query := fmt.Sprintf(`
 		SELECT
@@ -215,7 +263,7 @@ func (s *ModelStatusService) getModelPerformanceMap(modelNames []string, startTi
 			SUM(CASE WHEN type = 2 AND use_time > 0 AND use_time <= 10 THEN 1 ELSE 0 END) as duration_within_10s,
 			SUM(CASE WHEN type = 2 AND use_time > 0 AND use_time <= 20 THEN 1 ELSE 0 END) as duration_within_20s,
 			SUM(CASE WHEN type = 2 AND completion_tokens > 0 AND use_time > 0 THEN 1 ELSE 0 END) as output_requests,
-			COALESCE(SUM(CASE WHEN type = 2 AND prompt_tokens > 0 THEN prompt_tokens ELSE 0 END), 0) as prompt_tokens_sum,
+			%s,
 			%s,
 			COALESCE(SUM(CASE WHEN type = 2 AND completion_tokens > 0 AND use_time > 0 THEN completion_tokens ELSE 0 END), 0) as completion_tokens_sum,
 			COALESCE(SUM(CASE WHEN type = 2 AND completion_tokens > 0 AND use_time > 0 THEN use_time ELSE 0 END), 0) as use_time_sum
@@ -227,6 +275,7 @@ func (s *ModelStatusService) getModelPerformanceMap(modelNames []string, startTi
 		firstTokenTime,
 		firstTokenTime, firstTokenTime,
 		firstTokenTime, firstTokenTime,
+		cacheDenominatorSumSelect,
 		cacheTokensSumSelect,
 		strings.Join(placeholders, ", "),
 		s.db.Placeholder(len(modelNames)+1),
@@ -252,7 +301,7 @@ func (s *ModelStatusService) getModelPerformanceMap(modelNames []string, startTi
 			toInt64(row["duration_timed_requests"]),
 			toInt64(row["duration_within_10s"]),
 			toInt64(row["duration_within_20s"]),
-			toInt64(row["prompt_tokens_sum"]),
+			toInt64(row["cache_denominator_sum"]),
 			toInt64(row["cache_tokens_sum"]),
 			toInt64(row["completion_tokens_sum"]),
 			toInt64(row["use_time_sum"]),
@@ -280,6 +329,7 @@ func (s *ModelStatusService) GetChannelPerformanceSummaries(window string) ([]ma
 	startTime := now - twConfig.totalSeconds
 	firstTokenTime := s.firstTokenTimeExpr("l")
 	cacheTokensSumSelect := s.cacheTokensSumSelect("l")
+	cacheDenominatorSumSelect := s.cacheDenominatorSumSelect("l")
 
 	query := s.db.RebindQuery(fmt.Sprintf(`
 		SELECT
@@ -293,7 +343,7 @@ func (s *ModelStatusService) GetChannelPerformanceSummaries(window string) ([]ma
 			SUM(CASE WHEN l.type = 2 AND l.use_time > 0 AND l.use_time <= 10 THEN 1 ELSE 0 END) as duration_within_10s,
 			SUM(CASE WHEN l.type = 2 AND l.use_time > 0 AND l.use_time <= 20 THEN 1 ELSE 0 END) as duration_within_20s,
 			SUM(CASE WHEN l.type = 2 AND l.completion_tokens > 0 AND l.use_time > 0 THEN 1 ELSE 0 END) as output_requests,
-			COALESCE(SUM(CASE WHEN l.type = 2 AND l.prompt_tokens > 0 THEN l.prompt_tokens ELSE 0 END), 0) as prompt_tokens_sum,
+			%s,
 			%s,
 			COALESCE(SUM(CASE WHEN l.type = 2 AND l.completion_tokens > 0 AND l.use_time > 0 THEN l.completion_tokens ELSE 0 END), 0) as completion_tokens_sum,
 			COALESCE(SUM(CASE WHEN l.type = 2 AND l.completion_tokens > 0 AND l.use_time > 0 THEN l.use_time ELSE 0 END), 0) as use_time_sum
@@ -307,6 +357,7 @@ func (s *ModelStatusService) GetChannelPerformanceSummaries(window string) ([]ma
 		firstTokenTime,
 		firstTokenTime, firstTokenTime,
 		firstTokenTime, firstTokenTime,
+		cacheDenominatorSumSelect,
 		cacheTokensSumSelect))
 
 	rows, err := s.db.Query(query, startTime, now)
@@ -325,7 +376,7 @@ func (s *ModelStatusService) GetChannelPerformanceSummaries(window string) ([]ma
 			toInt64(row["duration_timed_requests"]),
 			toInt64(row["duration_within_10s"]),
 			toInt64(row["duration_within_20s"]),
-			toInt64(row["prompt_tokens_sum"]),
+			toInt64(row["cache_denominator_sum"]),
 			toInt64(row["cache_tokens_sum"]),
 			toInt64(row["completion_tokens_sum"]),
 			toInt64(row["use_time_sum"]),
