@@ -1482,17 +1482,17 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                         </div>
                       </div>
                       <div className="text-right text-[11px] text-muted-foreground">
-                        <div>首Token样本 {channel.timed_requests.toLocaleString()}</div>
-                        <div>耗时样本 {channel.duration_timed_requests.toLocaleString()}</div>
+                        <div>首Token计时 {channel.timed_requests.toLocaleString()}</div>
+                        <div>总耗时计时 {channel.duration_timed_requests.toLocaleString()}</div>
                         <div>输出样本 {channel.output_requests.toLocaleString()}</div>
                       </div>
                     </div>
 
                     <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 mt-3">
-                      <MetricPill label="5s首Token" value={formatRate(channel.within_5s_rate)} tone="emerald" />
-                      <MetricPill label="10s首Token" value={formatRate(channel.within_10s_rate)} tone="blue" />
-                      <MetricPill label="10s返回" value={formatRate(channel.duration_within_10s_rate)} tone="emerald" />
-                      <MetricPill label="20s返回" value={formatRate(channel.duration_within_20s_rate)} tone="blue" />
+                      <MetricPill label="首Token" detail="≤5s占比" value={formatRate(channel.within_5s_rate)} tone="emerald" />
+                      <MetricPill label="首Token" detail="≤10s占比" value={formatRate(channel.within_10s_rate)} tone="blue" />
+                      <MetricPill label="总耗时" detail="≤10s占比" value={formatRate(channel.duration_within_10s_rate)} tone="emerald" />
+                      <MetricPill label="总耗时" detail="≤20s占比" value={formatRate(channel.duration_within_20s_rate)} tone="blue" />
                       <MetricPill label="输出速度" value={formatTps(channel.completion_tps)} tone="amber" />
                     </div>
                   </CardContent>
@@ -2335,10 +2335,12 @@ function EmbedHelpModal({ onClose }: { onClose: () => void }) {
 
 function MetricPill({
   label,
+  detail,
   value,
   tone,
 }: {
   label: string
+  detail?: string
   value: string
   tone: 'emerald' | 'blue' | 'amber'
 }) {
@@ -2350,7 +2352,10 @@ function MetricPill({
 
   return (
     <div className={cn("rounded-lg border bg-gradient-to-br px-3 py-2", toneClass)}>
-      <div className="text-[11px] text-muted-foreground">{label}</div>
+      <div className="text-[11px] leading-tight text-muted-foreground">
+        <div className="font-medium text-foreground/80">{label}</div>
+        {detail && <div>{detail}</div>}
+      </div>
       <div className="text-sm font-semibold tabular-nums mt-1">{value}</div>
     </div>
   )
@@ -2438,10 +2443,10 @@ function ModelStatusCard({ model, dragHandleProps }: ModelStatusCardProps) {
         </div>
 
         <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 mb-3">
-          <MetricPill label="5s首Token" value={formatRate(model.within_5s_rate)} tone="emerald" />
-          <MetricPill label="10s首Token" value={formatRate(model.within_10s_rate)} tone="blue" />
-          <MetricPill label="10s返回" value={formatRate(model.duration_within_10s_rate)} tone="emerald" />
-          <MetricPill label="20s返回" value={formatRate(model.duration_within_20s_rate)} tone="blue" />
+          <MetricPill label="首Token" detail="≤5s占比" value={formatRate(model.within_5s_rate)} tone="emerald" />
+          <MetricPill label="首Token" detail="≤10s占比" value={formatRate(model.within_10s_rate)} tone="blue" />
+          <MetricPill label="总耗时" detail="≤10s占比" value={formatRate(model.duration_within_10s_rate)} tone="emerald" />
+          <MetricPill label="总耗时" detail="≤20s占比" value={formatRate(model.duration_within_20s_rate)} tone="blue" />
           <MetricPill label="输出速度" value={formatTps(model.completion_tps)} tone="amber" />
         </div>
 
