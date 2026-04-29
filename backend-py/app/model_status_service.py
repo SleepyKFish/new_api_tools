@@ -60,6 +60,7 @@ class ModelStatus:
     within_10s_rate: Optional[float] = None
     duration_within_10s_rate: Optional[float] = None
     duration_within_20s_rate: Optional[float] = None
+    cache_hit_rate: Optional[float] = None
     completion_tps: Optional[float] = None
     timed_requests: int = 0
     duration_timed_requests: int = 0
@@ -77,6 +78,7 @@ class ChannelPerformanceSummary:
     within_10s_rate: Optional[float] = None
     duration_within_10s_rate: Optional[float] = None
     duration_within_20s_rate: Optional[float] = None
+    cache_hit_rate: Optional[float] = None
     completion_tps: Optional[float] = None
     timed_requests: int = 0
     duration_timed_requests: int = 0
@@ -184,6 +186,8 @@ class ModelStatusService:
         duration_timed_requests: int,
         duration_within_10s: int,
         duration_within_20s: int,
+        total_prompt_tokens: float,
+        total_cache_tokens: float,
         total_completion_tokens: float,
         total_use_time: float,
     ) -> Dict[str, Any]:
@@ -192,6 +196,7 @@ class ModelStatusService:
         within_10s_rate = round(within_10s / timed_requests * 100, 2) if timed_requests > 0 else None
         duration_within_10s_rate = round(duration_within_10s / duration_timed_requests * 100, 2) if duration_timed_requests > 0 else None
         duration_within_20s_rate = round(duration_within_20s / duration_timed_requests * 100, 2) if duration_timed_requests > 0 else None
+        cache_hit_rate = round(total_cache_tokens / total_prompt_tokens * 100, 2) if total_prompt_tokens > 0 else None
         completion_tps = round(total_completion_tokens / total_use_time, 2) if total_use_time > 0 else None
         return {
             "total_requests": total_requests,
@@ -199,6 +204,7 @@ class ModelStatusService:
             "within_10s_rate": within_10s_rate,
             "duration_within_10s_rate": duration_within_10s_rate,
             "duration_within_20s_rate": duration_within_20s_rate,
+            "cache_hit_rate": cache_hit_rate,
             "completion_tps": completion_tps,
             "timed_requests": timed_requests,
             "duration_timed_requests": duration_timed_requests,
@@ -280,6 +286,46 @@ class ModelStatusService:
             END
         """
 
+    def _json_number_expr(self, json_expr: str, key: str) -> str:
+        """Build a SQL expression that extracts a numeric value from a JSON object."""
+        if self._db.config.engine == DatabaseEngine.POSTGRESQL:
+            return f"""
+                CASE
+                    WHEN {json_expr} IS NOT NULL AND {json_expr} <> '' AND {json_expr} <> 'null'
+                    THEN CAST(CAST({json_expr} AS jsonb)->>'{key}' AS DOUBLE PRECISION)
+                    ELSE 0
+                END
+            """
+        return f"""
+            CASE
+                WHEN {json_expr} IS NOT NULL AND {json_expr} <> '' AND JSON_VALID({json_expr})
+                THEN CAST(JSON_UNQUOTE(JSON_EXTRACT({json_expr}, '$.{key}')) AS DECIMAL(20,6))
+                ELSE 0
+            END
+        """
+
+    def _cache_tokens_sum_select(self, alias: str = "") -> str:
+        """Build a cache token aggregate that is safe for older NewAPI schemas."""
+        if not self._column_exists("logs", "other"):
+            return "0 as cache_tokens_sum"
+
+        prefix = f"{alias}." if alias else ""
+        type_col = f"{prefix}type"
+        prompt_col = f"{prefix}prompt_tokens"
+        other_col = f"{prefix}other"
+        cache_tokens = self._json_number_expr(other_col, "cache_tokens")
+        return f"""
+            COALESCE(SUM(CASE
+                WHEN {type_col} = :type_success
+                     AND {prompt_col} > 0
+                     AND {other_col} IS NOT NULL
+                     AND {other_col} <> ''
+                     AND ({cache_tokens}) > 0
+                THEN ({cache_tokens})
+                ELSE 0
+            END), 0) as cache_tokens_sum
+        """
+
     def _get_model_performance_map(
         self,
         model_names: List[str],
@@ -292,6 +338,7 @@ class ModelStatusService:
 
         model_placeholders = ", ".join([f":perf_model_{i}" for i in range(len(model_names))])
         first_token_time = self._first_token_time_expr()
+        cache_tokens_sum_select = self._cache_tokens_sum_select()
         sql = f"""
             SELECT
                 model_name,
@@ -303,6 +350,8 @@ class ModelStatusService:
                 SUM(CASE WHEN type = :type_success AND use_time > 0 AND use_time <= 10 THEN 1 ELSE 0 END) as duration_within_10s,
                 SUM(CASE WHEN type = :type_success AND use_time > 0 AND use_time <= 20 THEN 1 ELSE 0 END) as duration_within_20s,
                 SUM(CASE WHEN type = :type_success AND completion_tokens > 0 AND use_time > 0 THEN 1 ELSE 0 END) as output_requests,
+                COALESCE(SUM(CASE WHEN type = :type_success AND prompt_tokens > 0 THEN prompt_tokens ELSE 0 END), 0) as prompt_tokens_sum,
+                {cache_tokens_sum_select},
                 COALESCE(SUM(CASE WHEN type = :type_success AND completion_tokens > 0 AND use_time > 0 THEN completion_tokens ELSE 0 END), 0) as completion_tokens_sum,
                 COALESCE(SUM(CASE WHEN type = :type_success AND completion_tokens > 0 AND use_time > 0 THEN use_time ELSE 0 END), 0) as use_time_sum
             FROM logs
@@ -338,6 +387,8 @@ class ModelStatusService:
                     duration_timed_requests=int(row.get("duration_timed_requests") or 0),
                     duration_within_10s=int(row.get("duration_within_10s") or 0),
                     duration_within_20s=int(row.get("duration_within_20s") or 0),
+                    total_prompt_tokens=float(row.get("prompt_tokens_sum") or 0),
+                    total_cache_tokens=float(row.get("cache_tokens_sum") or 0),
                     total_completion_tokens=float(row.get("completion_tokens_sum") or 0),
                     total_use_time=float(row.get("use_time_sum") or 0),
                 )
@@ -365,6 +416,7 @@ class ModelStatusService:
         total_seconds, _, _ = get_time_window_config(time_window)
         window_start = now - total_seconds
         first_token_time = self._first_token_time_expr("l")
+        cache_tokens_sum_select = self._cache_tokens_sum_select("l")
 
         sql = f"""
             SELECT
@@ -378,6 +430,8 @@ class ModelStatusService:
                 SUM(CASE WHEN l.type = :type_success AND l.use_time > 0 AND l.use_time <= 10 THEN 1 ELSE 0 END) as duration_within_10s,
                 SUM(CASE WHEN l.type = :type_success AND l.use_time > 0 AND l.use_time <= 20 THEN 1 ELSE 0 END) as duration_within_20s,
                 SUM(CASE WHEN l.type = :type_success AND l.completion_tokens > 0 AND l.use_time > 0 THEN 1 ELSE 0 END) as output_requests,
+                COALESCE(SUM(CASE WHEN l.type = :type_success AND l.prompt_tokens > 0 THEN l.prompt_tokens ELSE 0 END), 0) as prompt_tokens_sum,
+                {cache_tokens_sum_select},
                 COALESCE(SUM(CASE WHEN l.type = :type_success AND l.completion_tokens > 0 AND l.use_time > 0 THEN l.completion_tokens ELSE 0 END), 0) as completion_tokens_sum,
                 COALESCE(SUM(CASE WHEN l.type = :type_success AND l.completion_tokens > 0 AND l.use_time > 0 THEN l.use_time ELSE 0 END), 0) as use_time_sum
             FROM logs l
@@ -409,6 +463,8 @@ class ModelStatusService:
                     duration_timed_requests=int(row.get("duration_timed_requests") or 0),
                     duration_within_10s=int(row.get("duration_within_10s") or 0),
                     duration_within_20s=int(row.get("duration_within_20s") or 0),
+                    total_prompt_tokens=float(row.get("prompt_tokens_sum") or 0),
+                    total_cache_tokens=float(row.get("cache_tokens_sum") or 0),
                     total_completion_tokens=float(row.get("completion_tokens_sum") or 0),
                     total_use_time=float(row.get("use_time_sum") or 0),
                 )
@@ -420,6 +476,7 @@ class ModelStatusService:
                     within_10s_rate=perf["within_10s_rate"],
                     duration_within_10s_rate=perf["duration_within_10s_rate"],
                     duration_within_20s_rate=perf["duration_within_20s_rate"],
+                    cache_hit_rate=perf["cache_hit_rate"],
                     completion_tps=perf["completion_tps"],
                     timed_requests=perf["timed_requests"],
                     duration_timed_requests=perf["duration_timed_requests"],
@@ -673,6 +730,7 @@ class ModelStatusService:
             within_10s_rate=performance.get("within_10s_rate"),
             duration_within_10s_rate=performance.get("duration_within_10s_rate"),
             duration_within_20s_rate=performance.get("duration_within_20s_rate"),
+            cache_hit_rate=performance.get("cache_hit_rate"),
             completion_tps=performance.get("completion_tps"),
             timed_requests=performance.get("timed_requests", 0),
             duration_timed_requests=performance.get("duration_timed_requests", 0),
@@ -839,6 +897,7 @@ class ModelStatusService:
                 within_10s_rate=performance_map.get(model_name, {}).get("within_10s_rate"),
                 duration_within_10s_rate=performance_map.get(model_name, {}).get("duration_within_10s_rate"),
                 duration_within_20s_rate=performance_map.get(model_name, {}).get("duration_within_20s_rate"),
+                cache_hit_rate=performance_map.get(model_name, {}).get("cache_hit_rate"),
                 completion_tps=performance_map.get(model_name, {}).get("completion_tps"),
                 timed_requests=performance_map.get(model_name, {}).get("timed_requests", 0),
                 duration_timed_requests=performance_map.get(model_name, {}).get("duration_timed_requests", 0),
@@ -893,6 +952,7 @@ class ModelStatusService:
             "within_10s_rate": status.within_10s_rate,
             "duration_within_10s_rate": status.duration_within_10s_rate,
             "duration_within_20s_rate": status.duration_within_20s_rate,
+            "cache_hit_rate": status.cache_hit_rate,
             "completion_tps": status.completion_tps,
             "timed_requests": status.timed_requests,
             "duration_timed_requests": status.duration_timed_requests,
@@ -917,6 +977,7 @@ class ModelStatusService:
             within_10s_rate=data.get("within_10s_rate"),
             duration_within_10s_rate=data.get("duration_within_10s_rate"),
             duration_within_20s_rate=data.get("duration_within_20s_rate"),
+            cache_hit_rate=data.get("cache_hit_rate"),
             completion_tps=data.get("completion_tps"),
             timed_requests=data.get("timed_requests", 0),
             duration_timed_requests=data.get("duration_timed_requests", 0),

@@ -39,6 +39,7 @@ interface ModelStatus {
   within_10s_rate: number | null
   duration_within_10s_rate: number | null
   duration_within_20s_rate: number | null
+  cache_hit_rate: number | null
   completion_tps: number | null
   timed_requests: number
   duration_timed_requests: number
@@ -54,6 +55,7 @@ interface ChannelPerformance {
   within_10s_rate: number | null
   duration_within_10s_rate: number | null
   duration_within_20s_rate: number | null
+  cache_hit_rate: number | null
   completion_tps: number | null
   timed_requests: number
   duration_timed_requests: number
@@ -1488,11 +1490,12 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                       </div>
                     </div>
 
-                    <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 mt-3">
+                    <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-2 mt-3">
                       <MetricPill label="首Token" detail="≤5s占比" value={formatRate(channel.within_5s_rate)} tone="emerald" />
                       <MetricPill label="首Token" detail="≤10s占比" value={formatRate(channel.within_10s_rate)} tone="blue" />
                       <MetricPill label="总耗时" detail="≤10s占比" value={formatRate(channel.duration_within_10s_rate)} tone="emerald" />
                       <MetricPill label="总耗时" detail="≤20s占比" value={formatRate(channel.duration_within_20s_rate)} tone="blue" />
+                      <MetricPill label="缓存" detail="命中率" value={formatRate(channel.cache_hit_rate)} tone="amber" />
                       <MetricPill label="输出速度" value={formatTps(channel.completion_tps)} tone="amber" />
                     </div>
                   </CardContent>
@@ -2351,8 +2354,8 @@ function MetricPill({
       : 'from-amber-500/10 to-amber-500/5 border-amber-500/20'
 
   return (
-    <div className={cn("rounded-lg border bg-gradient-to-br px-3 py-2", toneClass)}>
-      <div className="text-[11px] leading-tight text-muted-foreground">
+    <div className={cn("rounded-lg border bg-gradient-to-br px-3 py-2 min-h-[74px] flex flex-col", toneClass)}>
+      <div className="text-[11px] leading-tight text-muted-foreground min-h-[28px]">
         <div className="font-medium text-foreground/80">{label}</div>
         {detail && <div>{detail}</div>}
       </div>
@@ -2442,11 +2445,12 @@ function ModelStatusCard({ model, dragHandleProps }: ModelStatusCardProps) {
           </div>
         </div>
 
-        <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 mb-3">
+        <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-2 mb-3">
           <MetricPill label="首Token" detail="≤5s占比" value={formatRate(model.within_5s_rate)} tone="emerald" />
           <MetricPill label="首Token" detail="≤10s占比" value={formatRate(model.within_10s_rate)} tone="blue" />
           <MetricPill label="总耗时" detail="≤10s占比" value={formatRate(model.duration_within_10s_rate)} tone="emerald" />
           <MetricPill label="总耗时" detail="≤20s占比" value={formatRate(model.duration_within_20s_rate)} tone="blue" />
+          <MetricPill label="缓存" detail="命中率" value={formatRate(model.cache_hit_rate)} tone="amber" />
           <MetricPill label="输出速度" value={formatTps(model.completion_tps)} tone="amber" />
         </div>
 

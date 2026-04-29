@@ -65,11 +65,12 @@ func roundRate(rate float64) float64 {
 	return math.Round(rate*100) / 100
 }
 
-func buildPerformanceSummary(totalRequests, timedRequests, outputRequests, within5s, within10s, durationTimedRequests, durationWithin10s, durationWithin20s, completionTokensSum, useTimeSum int64) map[string]interface{} {
+func buildPerformanceSummary(totalRequests, timedRequests, outputRequests, within5s, within10s, durationTimedRequests, durationWithin10s, durationWithin20s, promptTokensSum, cacheTokensSum, completionTokensSum, useTimeSum int64) map[string]interface{} {
 	var within5sRate interface{}
 	var within10sRate interface{}
 	var durationWithin10sRate interface{}
 	var durationWithin20sRate interface{}
+	var cacheHitRate interface{}
 	var completionTPS interface{}
 
 	if timedRequests > 0 {
@@ -79,6 +80,9 @@ func buildPerformanceSummary(totalRequests, timedRequests, outputRequests, withi
 	if durationTimedRequests > 0 {
 		durationWithin10sRate = roundRate(float64(durationWithin10s) / float64(durationTimedRequests) * 100)
 		durationWithin20sRate = roundRate(float64(durationWithin20s) / float64(durationTimedRequests) * 100)
+	}
+	if promptTokensSum > 0 {
+		cacheHitRate = roundRate(float64(cacheTokensSum) / float64(promptTokensSum) * 100)
 	}
 	if useTimeSum > 0 {
 		completionTPS = roundRate(float64(completionTokensSum) / float64(useTimeSum))
@@ -90,6 +94,7 @@ func buildPerformanceSummary(totalRequests, timedRequests, outputRequests, withi
 		"within_10s_rate":          within10sRate,
 		"duration_within_10s_rate": durationWithin10sRate,
 		"duration_within_20s_rate": durationWithin20sRate,
+		"cache_hit_rate":           cacheHitRate,
 		"completion_tps":           completionTPS,
 		"timed_requests":           timedRequests,
 		"duration_timed_requests":  durationTimedRequests,
@@ -134,6 +139,45 @@ func (s *ModelStatusService) firstTokenTimeExpr(alias string) string {
 	END`, isStream, other, other, other, frtMS, frtMS, useTime)
 }
 
+func (s *ModelStatusService) jsonNumberExpr(jsonExpr, key string) string {
+	if s.db.IsPG {
+		return fmt.Sprintf(`CASE
+			WHEN %s IS NOT NULL AND %s <> '' AND %s <> 'null'
+			THEN CAST(CAST(%s AS jsonb)->>'%s' AS DOUBLE PRECISION)
+			ELSE 0
+		END`, jsonExpr, jsonExpr, jsonExpr, jsonExpr, key)
+	}
+	return fmt.Sprintf(`CASE
+		WHEN %s IS NOT NULL AND %s <> '' AND JSON_VALID(%s)
+		THEN CAST(JSON_UNQUOTE(JSON_EXTRACT(%s, '$.%s')) AS DECIMAL(20,6))
+		ELSE 0
+	END`, jsonExpr, jsonExpr, jsonExpr, jsonExpr, key)
+}
+
+func (s *ModelStatusService) cacheTokensSumSelect(alias string) string {
+	if !s.db.ColumnExists("logs", "other") {
+		return "0 as cache_tokens_sum"
+	}
+
+	prefix := ""
+	if alias != "" {
+		prefix = alias + "."
+	}
+	typeCol := prefix + "type"
+	promptCol := prefix + "prompt_tokens"
+	otherCol := prefix + "other"
+	cacheTokensExpr := s.jsonNumberExpr(otherCol, "cache_tokens")
+	return fmt.Sprintf(`COALESCE(SUM(CASE
+		WHEN %s = 2
+			AND %s > 0
+			AND %s IS NOT NULL
+			AND %s <> ''
+			AND (%s) > 0
+		THEN (%s)
+		ELSE 0
+	END), 0) as cache_tokens_sum`, typeCol, promptCol, otherCol, otherCol, cacheTokensExpr, cacheTokensExpr)
+}
+
 // ModelStatusService handles model availability monitoring
 type ModelStatusService struct {
 	db *database.Manager
@@ -158,6 +202,7 @@ func (s *ModelStatusService) getModelPerformanceMap(modelNames []string, startTi
 	}
 	args = append(args, startTime, now)
 	firstTokenTime := s.firstTokenTimeExpr("")
+	cacheTokensSumSelect := s.cacheTokensSumSelect("")
 
 	query := fmt.Sprintf(`
 		SELECT
@@ -170,6 +215,8 @@ func (s *ModelStatusService) getModelPerformanceMap(modelNames []string, startTi
 			SUM(CASE WHEN type = 2 AND use_time > 0 AND use_time <= 10 THEN 1 ELSE 0 END) as duration_within_10s,
 			SUM(CASE WHEN type = 2 AND use_time > 0 AND use_time <= 20 THEN 1 ELSE 0 END) as duration_within_20s,
 			SUM(CASE WHEN type = 2 AND completion_tokens > 0 AND use_time > 0 THEN 1 ELSE 0 END) as output_requests,
+			COALESCE(SUM(CASE WHEN type = 2 AND prompt_tokens > 0 THEN prompt_tokens ELSE 0 END), 0) as prompt_tokens_sum,
+			%s,
 			COALESCE(SUM(CASE WHEN type = 2 AND completion_tokens > 0 AND use_time > 0 THEN completion_tokens ELSE 0 END), 0) as completion_tokens_sum,
 			COALESCE(SUM(CASE WHEN type = 2 AND completion_tokens > 0 AND use_time > 0 THEN use_time ELSE 0 END), 0) as use_time_sum
 		FROM logs
@@ -180,6 +227,7 @@ func (s *ModelStatusService) getModelPerformanceMap(modelNames []string, startTi
 		firstTokenTime,
 		firstTokenTime, firstTokenTime,
 		firstTokenTime, firstTokenTime,
+		cacheTokensSumSelect,
 		strings.Join(placeholders, ", "),
 		s.db.Placeholder(len(modelNames)+1),
 		s.db.Placeholder(len(modelNames)+2),
@@ -204,6 +252,8 @@ func (s *ModelStatusService) getModelPerformanceMap(modelNames []string, startTi
 			toInt64(row["duration_timed_requests"]),
 			toInt64(row["duration_within_10s"]),
 			toInt64(row["duration_within_20s"]),
+			toInt64(row["prompt_tokens_sum"]),
+			toInt64(row["cache_tokens_sum"]),
 			toInt64(row["completion_tokens_sum"]),
 			toInt64(row["use_time_sum"]),
 		)
@@ -229,6 +279,7 @@ func (s *ModelStatusService) GetChannelPerformanceSummaries(window string) ([]ma
 	now := time.Now().Unix()
 	startTime := now - twConfig.totalSeconds
 	firstTokenTime := s.firstTokenTimeExpr("l")
+	cacheTokensSumSelect := s.cacheTokensSumSelect("l")
 
 	query := s.db.RebindQuery(fmt.Sprintf(`
 		SELECT
@@ -242,6 +293,8 @@ func (s *ModelStatusService) GetChannelPerformanceSummaries(window string) ([]ma
 			SUM(CASE WHEN l.type = 2 AND l.use_time > 0 AND l.use_time <= 10 THEN 1 ELSE 0 END) as duration_within_10s,
 			SUM(CASE WHEN l.type = 2 AND l.use_time > 0 AND l.use_time <= 20 THEN 1 ELSE 0 END) as duration_within_20s,
 			SUM(CASE WHEN l.type = 2 AND l.completion_tokens > 0 AND l.use_time > 0 THEN 1 ELSE 0 END) as output_requests,
+			COALESCE(SUM(CASE WHEN l.type = 2 AND l.prompt_tokens > 0 THEN l.prompt_tokens ELSE 0 END), 0) as prompt_tokens_sum,
+			%s,
 			COALESCE(SUM(CASE WHEN l.type = 2 AND l.completion_tokens > 0 AND l.use_time > 0 THEN l.completion_tokens ELSE 0 END), 0) as completion_tokens_sum,
 			COALESCE(SUM(CASE WHEN l.type = 2 AND l.completion_tokens > 0 AND l.use_time > 0 THEN l.use_time ELSE 0 END), 0) as use_time_sum
 		FROM logs l
@@ -253,7 +306,8 @@ func (s *ModelStatusService) GetChannelPerformanceSummaries(window string) ([]ma
 		ORDER BY success_requests DESC, channel_id ASC`,
 		firstTokenTime,
 		firstTokenTime, firstTokenTime,
-		firstTokenTime, firstTokenTime))
+		firstTokenTime, firstTokenTime,
+		cacheTokensSumSelect))
 
 	rows, err := s.db.Query(query, startTime, now)
 	if err != nil {
@@ -271,6 +325,8 @@ func (s *ModelStatusService) GetChannelPerformanceSummaries(window string) ([]ma
 			toInt64(row["duration_timed_requests"]),
 			toInt64(row["duration_within_10s"]),
 			toInt64(row["duration_within_20s"]),
+			toInt64(row["prompt_tokens_sum"]),
+			toInt64(row["cache_tokens_sum"]),
 			toInt64(row["completion_tokens_sum"]),
 			toInt64(row["use_time_sum"]),
 		)
@@ -286,6 +342,7 @@ func (s *ModelStatusService) GetChannelPerformanceSummaries(window string) ([]ma
 			"within_10s_rate":          perf["within_10s_rate"],
 			"duration_within_10s_rate": perf["duration_within_10s_rate"],
 			"duration_within_20s_rate": perf["duration_within_20s_rate"],
+			"cache_hit_rate":           perf["cache_hit_rate"],
 			"completion_tps":           perf["completion_tps"],
 			"timed_requests":           perf["timed_requests"],
 			"duration_timed_requests":  perf["duration_timed_requests"],
@@ -461,6 +518,7 @@ func (s *ModelStatusService) GetModelStatus(modelName, window string) (map[strin
 		"within_10s_rate":          perf["within_10s_rate"],
 		"duration_within_10s_rate": perf["duration_within_10s_rate"],
 		"duration_within_20s_rate": perf["duration_within_20s_rate"],
+		"cache_hit_rate":           perf["cache_hit_rate"],
 		"completion_tps":           perf["completion_tps"],
 		"timed_requests":           perf["timed_requests"],
 		"duration_timed_requests":  perf["duration_timed_requests"],
@@ -492,6 +550,7 @@ func (s *ModelStatusService) GetMultipleModelsStatus(modelNames []string, window
 			status["within_10s_rate"] = perf["within_10s_rate"]
 			status["duration_within_10s_rate"] = perf["duration_within_10s_rate"]
 			status["duration_within_20s_rate"] = perf["duration_within_20s_rate"]
+			status["cache_hit_rate"] = perf["cache_hit_rate"]
 			status["completion_tps"] = perf["completion_tps"]
 			status["timed_requests"] = perf["timed_requests"]
 			status["duration_timed_requests"] = perf["duration_timed_requests"]

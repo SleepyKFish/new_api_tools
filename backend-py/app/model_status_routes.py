@@ -69,6 +69,7 @@ class ModelStatusItem(BaseModel):
     within_10s_rate: Optional[float] = None
     duration_within_10s_rate: Optional[float] = None
     duration_within_20s_rate: Optional[float] = None
+    cache_hit_rate: Optional[float] = None
     completion_tps: Optional[float] = None
     timed_requests: int = 0
     duration_timed_requests: int = 0
@@ -85,6 +86,7 @@ class ChannelPerformanceItem(BaseModel):
     within_10s_rate: Optional[float] = None
     duration_within_10s_rate: Optional[float] = None
     duration_within_20s_rate: Optional[float] = None
+    cache_hit_rate: Optional[float] = None
     completion_tps: Optional[float] = None
     timed_requests: int = 0
     duration_timed_requests: int = 0
@@ -177,6 +179,7 @@ def model_status_to_item(status: ModelStatus) -> ModelStatusItem:
         within_10s_rate=status.within_10s_rate,
         duration_within_10s_rate=status.duration_within_10s_rate,
         duration_within_20s_rate=status.duration_within_20s_rate,
+        cache_hit_rate=status.cache_hit_rate,
         completion_tps=status.completion_tps,
         timed_requests=status.timed_requests,
         duration_timed_requests=status.duration_timed_requests,
@@ -206,6 +209,7 @@ def channel_performance_to_item(summary: ChannelPerformanceSummary) -> ChannelPe
         within_10s_rate=summary.within_10s_rate,
         duration_within_10s_rate=summary.duration_within_10s_rate,
         duration_within_20s_rate=summary.duration_within_20s_rate,
+        cache_hit_rate=summary.cache_hit_rate,
         completion_tps=summary.completion_tps,
         timed_requests=summary.timed_requests,
         duration_timed_requests=summary.duration_timed_requests,
