@@ -1,8 +1,10 @@
 package service
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -28,6 +30,7 @@ var (
 	}
 	AvailableRefreshIntervals = []int{0, 30, 60, 120, 300}
 	AvailableSortModes        = []string{"default", "availability", "custom"}
+	performanceLogBatchSize   = 5000
 )
 
 // Time window slot configurations: {totalSeconds, numSlots, slotSeconds}
@@ -65,7 +68,7 @@ func roundRate(rate float64) float64 {
 	return math.Round(rate*100) / 100
 }
 
-func buildPerformanceSummary(totalRequests, timedRequests, outputRequests, within5s, within10s, durationTimedRequests, durationWithin10s, durationWithin20s, cacheDenominatorSum, cacheTokensSum, completionTokensSum, useTimeSum int64) map[string]interface{} {
+func buildPerformanceSummary(totalRequests, timedRequests, outputRequests, within5s, within10s, durationTimedRequests, durationWithin10s, durationWithin20s int64, cacheDenominatorSum, cacheTokensSum, completionTokensSum, useTimeSum float64) map[string]interface{} {
 	var within5sRate interface{}
 	var within10sRate interface{}
 	var durationWithin10sRate interface{}
@@ -86,10 +89,10 @@ func buildPerformanceSummary(totalRequests, timedRequests, outputRequests, withi
 		if cacheHitTokens > cacheDenominatorSum {
 			cacheHitTokens = cacheDenominatorSum
 		}
-		cacheHitRate = roundRate(float64(cacheHitTokens) / float64(cacheDenominatorSum) * 100)
+		cacheHitRate = roundRate(cacheHitTokens / cacheDenominatorSum * 100)
 	}
 	if useTimeSum > 0 {
-		completionTPS = roundRate(float64(completionTokensSum) / float64(useTimeSum))
+		completionTPS = roundRate(completionTokensSum / useTimeSum)
 	}
 
 	return map[string]interface{}{
@@ -269,9 +272,296 @@ type ModelStatusService struct {
 	db *database.Manager
 }
 
+type performanceStats struct {
+	successRequests       int64
+	timedRequests         int64
+	within5s              int64
+	within10s             int64
+	durationTimedRequests int64
+	durationWithin10s     int64
+	durationWithin20s     int64
+	outputRequests        int64
+	cacheDenominatorSum   float64
+	cacheTokensSum        float64
+	completionTokensSum   float64
+	useTimeSum            float64
+}
+
 // NewModelStatusService creates a new ModelStatusService
 func NewModelStatusService() *ModelStatusService {
 	return &ModelStatusService{db: database.Get()}
+}
+
+func performanceSummaryFromStats(stats *performanceStats) map[string]interface{} {
+	if stats == nil {
+		stats = &performanceStats{}
+	}
+	return buildPerformanceSummary(
+		stats.successRequests,
+		stats.timedRequests,
+		stats.outputRequests,
+		stats.within5s,
+		stats.within10s,
+		stats.durationTimedRequests,
+		stats.durationWithin10s,
+		stats.durationWithin20s,
+		stats.cacheDenominatorSum,
+		stats.cacheTokensSum,
+		stats.completionTokensSum,
+		stats.useTimeSum,
+	)
+}
+
+func toBool(v interface{}) bool {
+	switch value := v.(type) {
+	case bool:
+		return value
+	case int, int64, int32, uint64, float64, float32:
+		return toFloat64(value) != 0
+	case string:
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "true", "1", "yes", "y", "on":
+			return true
+		}
+	}
+	return false
+}
+
+func parseOtherJSON(v interface{}) map[string]interface{} {
+	if other, ok := v.(map[string]interface{}); ok {
+		return other
+	}
+	raw := strings.TrimSpace(toString(v))
+	if raw == "" || strings.EqualFold(raw, "null") {
+		return map[string]interface{}{}
+	}
+	var parsed map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		return map[string]interface{}{}
+	}
+	if parsed == nil {
+		return map[string]interface{}{}
+	}
+	return parsed
+}
+
+func otherText(other map[string]interface{}, keys []string) string {
+	for _, key := range keys {
+		value, ok := other[key]
+		if !ok || value == nil {
+			continue
+		}
+		if items, ok := value.([]interface{}); ok {
+			parts := make([]string, 0, len(items))
+			for _, item := range items {
+				if item != nil {
+					parts = append(parts, fmt.Sprint(item))
+				}
+			}
+			return strings.Join(parts, " -> ")
+		}
+		return fmt.Sprint(value)
+	}
+	return ""
+}
+
+func isClaudeMessagesRequest(other map[string]interface{}) bool {
+	if toBool(other["claude"]) {
+		return true
+	}
+
+	var conversionValue interface{}
+	for _, key := range []string{
+		"request_conversion",
+		"conversion",
+		"request_format",
+		"request_relay_format",
+		"final_request_relay_format",
+		"relay_format",
+	} {
+		if value, ok := other[key]; ok && value != nil {
+			conversionValue = value
+			break
+		}
+	}
+
+	if items, ok := conversionValue.([]interface{}); ok {
+		for i := len(items) - 1; i >= 0; i-- {
+			if items[i] == nil {
+				continue
+			}
+			return strings.EqualFold(strings.TrimSpace(fmt.Sprint(items[i])), "claude messages")
+		}
+	} else if conversionValue != nil {
+		conversionText := strings.ToLower(strings.TrimSpace(fmt.Sprint(conversionValue)))
+		if conversionText == "claude messages" ||
+			strings.Contains(conversionText, "-> claude messages") ||
+			strings.Contains(conversionText, "->claude messages") {
+			return true
+		}
+	}
+
+	requestPath := strings.ToLower(otherText(other, []string{
+		"请求路径",
+		"request_path",
+		"path",
+		"endpoint",
+		"url",
+		"request_url",
+	}))
+	return strings.Contains(requestPath, "/v1/messages")
+}
+
+func accumulatePerformanceRow(stats *performanceStats, row map[string]interface{}) {
+	if stats == nil || toInt64(row["type"]) != 2 {
+		return
+	}
+
+	stats.successRequests++
+
+	useTime := toFloat64(row["use_time"])
+	promptTokens := toFloat64(row["prompt_tokens"])
+	completionTokens := toFloat64(row["completion_tokens"])
+	isStream := toBool(row["is_stream"])
+	other := parseOtherJSON(row["other"])
+	frtSeconds := toFloat64(other["frt"]) / 1000.0
+
+	firstTokenTime := useTime
+	if isStream && frtSeconds > 0 {
+		firstTokenTime = frtSeconds
+	}
+	if firstTokenTime > 0 {
+		stats.timedRequests++
+		if firstTokenTime <= 5 {
+			stats.within5s++
+		}
+		if firstTokenTime <= 10 {
+			stats.within10s++
+		}
+	}
+
+	if useTime > 0 {
+		stats.durationTimedRequests++
+		if useTime <= 10 {
+			stats.durationWithin10s++
+		}
+		if useTime <= 20 {
+			stats.durationWithin20s++
+		}
+	}
+
+	if completionTokens > 0 && useTime > 0 {
+		effectiveTime := useTime
+		if isStream && frtSeconds > 0 {
+			effectiveTime = math.Max(useTime-frtSeconds, 1)
+		}
+		stats.outputRequests++
+		stats.completionTokensSum += completionTokens
+		stats.useTimeSum += effectiveTime
+	}
+
+	cacheTokens := toFloat64(other["cache_tokens"])
+	if cacheTokens > 0 {
+		stats.cacheTokensSum += cacheTokens
+	}
+	if isClaudeMessagesRequest(other) {
+		stats.cacheDenominatorSum += promptTokens + cacheTokens
+	} else {
+		stats.cacheDenominatorSum += math.Max(promptTokens, cacheTokens)
+	}
+}
+
+func (s *ModelStatusService) performanceLogColumns() string {
+	columns := []string{
+		"id",
+		"created_at",
+		"model_name",
+		"channel_id",
+		"type",
+		"use_time",
+		"prompt_tokens",
+		"completion_tokens",
+	}
+	if s.db.ColumnExists("logs", "is_stream") {
+		columns = append(columns, "is_stream")
+	} else {
+		columns = append(columns, "0 as is_stream")
+	}
+	if s.db.ColumnExists("logs", "other") {
+		columns = append(columns, "other")
+	} else {
+		columns = append(columns, "NULL as other")
+	}
+	return strings.Join(columns, ", ")
+}
+
+func (s *ModelStatusService) fetchPerformanceLogBatch(startTime, now, cursorCreatedAt, cursorID int64, modelNames []string) ([]map[string]interface{}, error) {
+	args := []interface{}{startTime, now, cursorCreatedAt, cursorCreatedAt, cursorID}
+	modelFilter := ""
+	if len(modelNames) > 0 {
+		placeholders := make([]string, 0, len(modelNames))
+		for _, modelName := range modelNames {
+			placeholders = append(placeholders, "?")
+			args = append(args, modelName)
+		}
+		modelFilter = fmt.Sprintf("AND model_name IN (%s)", strings.Join(placeholders, ", "))
+	}
+	args = append(args, performanceLogBatchSize)
+
+	query := s.db.RebindQuery(fmt.Sprintf(`
+		SELECT %s
+		FROM logs
+		WHERE created_at >= ? AND created_at < ?
+			AND type IN (2, 5)
+			AND (
+				created_at > ?
+				OR (created_at = ? AND id > ?)
+			)
+			%s
+		ORDER BY created_at ASC, id ASC
+		LIMIT ?`, s.performanceLogColumns(), modelFilter))
+
+	return s.db.Query(query, args...)
+}
+
+func (s *ModelStatusService) getChannelNameMap(channelIDs []int64) map[int64]string {
+	result := make(map[int64]string)
+	if len(channelIDs) == 0 {
+		return result
+	}
+
+	seen := make(map[int64]bool, len(channelIDs))
+	placeholders := make([]string, 0, len(channelIDs))
+	args := make([]interface{}, 0, len(channelIDs))
+	for _, channelID := range channelIDs {
+		if channelID <= 0 || seen[channelID] {
+			continue
+		}
+		seen[channelID] = true
+		placeholders = append(placeholders, "?")
+		args = append(args, channelID)
+	}
+	if len(args) == 0 {
+		return result
+	}
+
+	query := s.db.RebindQuery(fmt.Sprintf(`
+		SELECT id, COALESCE(name, '') as name
+		FROM channels
+		WHERE id IN (%s)`, strings.Join(placeholders, ", ")))
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return result
+	}
+	for _, row := range rows {
+		channelID := toInt64(row["id"])
+		name := toString(row["name"])
+		if name == "" {
+			name = fmt.Sprintf("Channel#%d", channelID)
+		}
+		result[channelID] = name
+	}
+	return result
 }
 
 func (s *ModelStatusService) getModelPerformanceMap(modelNames []string, startTime, now int64) map[string]map[string]interface{} {
@@ -280,71 +570,34 @@ func (s *ModelStatusService) getModelPerformanceMap(modelNames []string, startTi
 		return result
 	}
 
-	placeholders := make([]string, 0, len(modelNames))
-	args := make([]interface{}, 0, len(modelNames)+2)
-	for i, modelName := range modelNames {
-		placeholders = append(placeholders, s.db.Placeholder(i+1))
-		args = append(args, modelName)
-	}
-	args = append(args, startTime, now)
-	firstTokenTime := s.firstTokenTimeExpr("")
-	cacheTokensSumSelect := s.cacheTokensSumSelect("")
-	cacheDenominatorSumSelect := s.cacheDenominatorSumSelect("")
-
-	query := fmt.Sprintf(`
-		SELECT
-			model_name,
-			SUM(CASE WHEN type = 2 THEN 1 ELSE 0 END) as success_requests,
-			SUM(CASE WHEN type = 2 AND (%s) > 0 THEN 1 ELSE 0 END) as timed_requests,
-			SUM(CASE WHEN type = 2 AND (%s) > 0 AND (%s) <= 5 THEN 1 ELSE 0 END) as within_5s,
-			SUM(CASE WHEN type = 2 AND (%s) > 0 AND (%s) <= 10 THEN 1 ELSE 0 END) as within_10s,
-			SUM(CASE WHEN type = 2 AND use_time > 0 THEN 1 ELSE 0 END) as duration_timed_requests,
-			SUM(CASE WHEN type = 2 AND use_time > 0 AND use_time <= 10 THEN 1 ELSE 0 END) as duration_within_10s,
-			SUM(CASE WHEN type = 2 AND use_time > 0 AND use_time <= 20 THEN 1 ELSE 0 END) as duration_within_20s,
-			SUM(CASE WHEN type = 2 AND completion_tokens > 0 AND use_time > 0 THEN 1 ELSE 0 END) as output_requests,
-			%s,
-			%s,
-			COALESCE(SUM(CASE WHEN type = 2 AND completion_tokens > 0 AND use_time > 0 THEN completion_tokens ELSE 0 END), 0) as completion_tokens_sum,
-			COALESCE(SUM(CASE WHEN type = 2 AND completion_tokens > 0 AND use_time > 0 THEN use_time ELSE 0 END), 0) as use_time_sum
-		FROM logs
-		WHERE model_name IN (%s)
-			AND created_at >= %s AND created_at < %s
-			AND type IN (2, 5)
-		GROUP BY model_name`,
-		firstTokenTime,
-		firstTokenTime, firstTokenTime,
-		firstTokenTime, firstTokenTime,
-		cacheDenominatorSumSelect,
-		cacheTokensSumSelect,
-		strings.Join(placeholders, ", "),
-		s.db.Placeholder(len(modelNames)+1),
-		s.db.Placeholder(len(modelNames)+2),
-	)
-
-	rows, err := s.db.Query(query, args...)
-	if err != nil {
-		return result
+	statsByModel := make(map[string]*performanceStats, len(modelNames))
+	for _, modelName := range modelNames {
+		statsByModel[modelName] = &performanceStats{}
 	}
 
-	for _, row := range rows {
-		modelName := toString(row["model_name"])
-		if modelName == "" {
-			continue
+	cursorCreatedAt := startTime - 1
+	cursorID := int64(0)
+	for {
+		rows, err := s.fetchPerformanceLogBatch(startTime, now, cursorCreatedAt, cursorID, modelNames)
+		if err != nil || len(rows) == 0 {
+			break
 		}
-		result[modelName] = buildPerformanceSummary(
-			toInt64(row["success_requests"]),
-			toInt64(row["timed_requests"]),
-			toInt64(row["output_requests"]),
-			toInt64(row["within_5s"]),
-			toInt64(row["within_10s"]),
-			toInt64(row["duration_timed_requests"]),
-			toInt64(row["duration_within_10s"]),
-			toInt64(row["duration_within_20s"]),
-			toInt64(row["cache_denominator_sum"]),
-			toInt64(row["cache_tokens_sum"]),
-			toInt64(row["completion_tokens_sum"]),
-			toInt64(row["use_time_sum"]),
-		)
+		for _, row := range rows {
+			modelName := toString(row["model_name"])
+			if stats, ok := statsByModel[modelName]; ok {
+				accumulatePerformanceRow(stats, row)
+			}
+		}
+		lastRow := rows[len(rows)-1]
+		cursorCreatedAt = toInt64(lastRow["created_at"])
+		cursorID = toInt64(lastRow["id"])
+		if len(rows) < performanceLogBatchSize {
+			break
+		}
+	}
+
+	for modelName, stats := range statsByModel {
+		result[modelName] = performanceSummaryFromStats(stats)
 	}
 
 	return result
@@ -366,66 +619,67 @@ func (s *ModelStatusService) GetChannelPerformanceSummaries(window string) ([]ma
 
 	now := time.Now().Unix()
 	startTime := now - twConfig.totalSeconds
-	firstTokenTime := s.firstTokenTimeExpr("l")
-	cacheTokensSumSelect := s.cacheTokensSumSelect("l")
-	cacheDenominatorSumSelect := s.cacheDenominatorSumSelect("l")
 
-	query := s.db.RebindQuery(fmt.Sprintf(`
-		SELECT
-			c.id as channel_id,
-			COALESCE(c.name, '') as channel_name,
-			SUM(CASE WHEN l.type = 2 THEN 1 ELSE 0 END) as success_requests,
-			SUM(CASE WHEN l.type = 2 AND (%s) > 0 THEN 1 ELSE 0 END) as timed_requests,
-			SUM(CASE WHEN l.type = 2 AND (%s) > 0 AND (%s) <= 5 THEN 1 ELSE 0 END) as within_5s,
-			SUM(CASE WHEN l.type = 2 AND (%s) > 0 AND (%s) <= 10 THEN 1 ELSE 0 END) as within_10s,
-			SUM(CASE WHEN l.type = 2 AND l.use_time > 0 THEN 1 ELSE 0 END) as duration_timed_requests,
-			SUM(CASE WHEN l.type = 2 AND l.use_time > 0 AND l.use_time <= 10 THEN 1 ELSE 0 END) as duration_within_10s,
-			SUM(CASE WHEN l.type = 2 AND l.use_time > 0 AND l.use_time <= 20 THEN 1 ELSE 0 END) as duration_within_20s,
-			SUM(CASE WHEN l.type = 2 AND l.completion_tokens > 0 AND l.use_time > 0 THEN 1 ELSE 0 END) as output_requests,
-			%s,
-			%s,
-			COALESCE(SUM(CASE WHEN l.type = 2 AND l.completion_tokens > 0 AND l.use_time > 0 THEN l.completion_tokens ELSE 0 END), 0) as completion_tokens_sum,
-			COALESCE(SUM(CASE WHEN l.type = 2 AND l.completion_tokens > 0 AND l.use_time > 0 THEN l.use_time ELSE 0 END), 0) as use_time_sum
-		FROM logs l
-		INNER JOIN channels c ON c.id = l.channel_id
-		WHERE l.created_at >= ? AND l.created_at < ?
-			AND l.type IN (2, 5)
-		GROUP BY c.id, c.name
-		HAVING SUM(CASE WHEN l.type = 2 THEN 1 ELSE 0 END) > 0
-		ORDER BY success_requests DESC, channel_id ASC`,
-		firstTokenTime,
-		firstTokenTime, firstTokenTime,
-		firstTokenTime, firstTokenTime,
-		cacheDenominatorSumSelect,
-		cacheTokensSumSelect))
-
-	rows, err := s.db.Query(query, startTime, now)
-	if err != nil {
-		return nil, err
+	statsByChannel := make(map[int64]*performanceStats)
+	cursorCreatedAt := startTime - 1
+	cursorID := int64(0)
+	for {
+		rows, err := s.fetchPerformanceLogBatch(startTime, now, cursorCreatedAt, cursorID, nil)
+		if err != nil {
+			return nil, err
+		}
+		if len(rows) == 0 {
+			break
+		}
+		for _, row := range rows {
+			channelID := toInt64(row["channel_id"])
+			stats := statsByChannel[channelID]
+			if stats == nil {
+				stats = &performanceStats{}
+				statsByChannel[channelID] = stats
+			}
+			accumulatePerformanceRow(stats, row)
+		}
+		lastRow := rows[len(rows)-1]
+		cursorCreatedAt = toInt64(lastRow["created_at"])
+		cursorID = toInt64(lastRow["id"])
+		if len(rows) < performanceLogBatchSize {
+			break
+		}
 	}
 
-	results := make([]map[string]interface{}, 0, len(rows))
-	for _, row := range rows {
-		perf := buildPerformanceSummary(
-			toInt64(row["success_requests"]),
-			toInt64(row["timed_requests"]),
-			toInt64(row["output_requests"]),
-			toInt64(row["within_5s"]),
-			toInt64(row["within_10s"]),
-			toInt64(row["duration_timed_requests"]),
-			toInt64(row["duration_within_10s"]),
-			toInt64(row["duration_within_20s"]),
-			toInt64(row["cache_denominator_sum"]),
-			toInt64(row["cache_tokens_sum"]),
-			toInt64(row["completion_tokens_sum"]),
-			toInt64(row["use_time_sum"]),
-		)
-		channelName := toString(row["channel_name"])
+	channelIDs := make([]int64, 0, len(statsByChannel))
+	for channelID := range statsByChannel {
+		channelIDs = append(channelIDs, channelID)
+	}
+	channelNames := s.getChannelNameMap(channelIDs)
+
+	type channelStat struct {
+		id    int64
+		stats *performanceStats
+	}
+	ordered := make([]channelStat, 0, len(statsByChannel))
+	for channelID, stats := range statsByChannel {
+		if stats.successRequests > 0 {
+			ordered = append(ordered, channelStat{id: channelID, stats: stats})
+		}
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		if ordered[i].stats.successRequests == ordered[j].stats.successRequests {
+			return ordered[i].id < ordered[j].id
+		}
+		return ordered[i].stats.successRequests > ordered[j].stats.successRequests
+	})
+
+	results := make([]map[string]interface{}, 0, len(ordered))
+	for _, item := range ordered {
+		perf := performanceSummaryFromStats(item.stats)
+		channelName := channelNames[item.id]
 		if channelName == "" {
-			channelName = fmt.Sprintf("Channel#%d", toInt64(row["channel_id"]))
+			channelName = fmt.Sprintf("Channel#%d", item.id)
 		}
 		results = append(results, map[string]interface{}{
-			"channel_id":               toInt64(row["channel_id"]),
+			"channel_id":               item.id,
 			"channel_name":             channelName,
 			"total_requests":           perf["total_requests"],
 			"within_5s_rate":           perf["within_5s_rate"],
