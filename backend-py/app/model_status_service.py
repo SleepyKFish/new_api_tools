@@ -286,6 +286,41 @@ class ModelStatusService:
             END
         """
 
+    def _effective_generation_time_expr(self, alias: str = "") -> str:
+        """
+        Effective generation time for tok/s calculation.
+
+        Streaming requests: total use_time minus TTFT (first-token latency),
+        clamped to ≥1 s so we never divide by a tiny or negative number.
+        Non-streaming / missing frt: use the full use_time as-is.
+        """
+        prefix = f"{alias}." if alias else ""
+        use_time = f"{prefix}use_time"
+
+        if not (self._column_exists("logs", "is_stream") and self._column_exists("logs", "other")):
+            return use_time
+
+        other = f"{prefix}other"
+        is_stream = f"{prefix}is_stream"
+
+        if self._db.config.engine == DatabaseEngine.POSTGRESQL:
+            frt_ms = f"CAST(CAST(NULLIF(NULLIF({other}, ''), 'null') AS jsonb)->>'frt' AS DOUBLE PRECISION)"
+            stream_cond = (
+                f"COALESCE({is_stream}, false) = true"
+                f" AND {other} IS NOT NULL AND {other} <> '' AND {other} <> 'null'"
+                f" AND COALESCE({frt_ms}, 0) > 0"
+            )
+        else:
+            frt_ms = f"CAST(JSON_UNQUOTE(JSON_EXTRACT({other}, '$.frt')) AS DECIMAL(20,6))"
+            stream_cond = (
+                f"COALESCE({is_stream}, 0) = 1"
+                f" AND {other} IS NOT NULL AND {other} <> '' AND JSON_VALID({other})"
+                f" AND COALESCE({frt_ms}, 0) > 0"
+            )
+
+        effective = f"({use_time} - ({frt_ms} / 1000.0))"
+        return f"CASE WHEN {stream_cond} THEN GREATEST(1, {effective}) ELSE {use_time} END"
+
     def _json_number_expr(self, json_expr: str, key: str) -> str:
         """Build a SQL expression that extracts a numeric value from a JSON object."""
         if self._db.config.engine == DatabaseEngine.POSTGRESQL:
@@ -411,6 +446,7 @@ class ModelStatusService:
 
         model_placeholders = ", ".join([f":perf_model_{i}" for i in range(len(model_names))])
         first_token_time = self._first_token_time_expr()
+        effective_gen_time = self._effective_generation_time_expr()
         cache_tokens_sum_select = self._cache_tokens_sum_select()
         cache_denominator_sum_select = self._cache_denominator_sum_select()
         sql = f"""
@@ -427,7 +463,7 @@ class ModelStatusService:
                 {cache_denominator_sum_select},
                 {cache_tokens_sum_select},
                 COALESCE(SUM(CASE WHEN type = :type_success AND completion_tokens > 0 AND use_time > 0 THEN completion_tokens ELSE 0 END), 0) as completion_tokens_sum,
-                COALESCE(SUM(CASE WHEN type = :type_success AND completion_tokens > 0 AND use_time > 0 THEN use_time ELSE 0 END), 0) as use_time_sum
+                COALESCE(SUM(CASE WHEN type = :type_success AND completion_tokens > 0 AND use_time > 0 THEN ({effective_gen_time}) ELSE 0 END), 0) as use_time_sum
             FROM logs
             WHERE model_name IN ({model_placeholders})
               AND created_at >= :window_start
@@ -490,6 +526,7 @@ class ModelStatusService:
         total_seconds, _, _ = get_time_window_config(time_window)
         window_start = now - total_seconds
         first_token_time = self._first_token_time_expr("l")
+        effective_gen_time = self._effective_generation_time_expr("l")
         cache_tokens_sum_select = self._cache_tokens_sum_select("l")
         cache_denominator_sum_select = self._cache_denominator_sum_select("l")
 
@@ -508,7 +545,7 @@ class ModelStatusService:
                 {cache_denominator_sum_select},
                 {cache_tokens_sum_select},
                 COALESCE(SUM(CASE WHEN l.type = :type_success AND l.completion_tokens > 0 AND l.use_time > 0 THEN l.completion_tokens ELSE 0 END), 0) as completion_tokens_sum,
-                COALESCE(SUM(CASE WHEN l.type = :type_success AND l.completion_tokens > 0 AND l.use_time > 0 THEN l.use_time ELSE 0 END), 0) as use_time_sum
+                COALESCE(SUM(CASE WHEN l.type = :type_success AND l.completion_tokens > 0 AND l.use_time > 0 THEN ({effective_gen_time}) ELSE 0 END), 0) as use_time_sum
             FROM logs l
             INNER JOIN channels c ON c.id = l.channel_id
             WHERE l.created_at >= :window_start
