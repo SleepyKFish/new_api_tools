@@ -325,11 +325,25 @@ class ModelStatusService:
     def _request_path_expr(self, other_col: str) -> str:
         """Best-effort request path extraction from NewAPI logs.other."""
         return "LOWER(COALESCE(" + ", ".join([
+            self._json_text_expr(other_col, "请求路径"),
             self._json_text_expr(other_col, "request_path"),
             self._json_text_expr(other_col, "path"),
             self._json_text_expr(other_col, "endpoint"),
             self._json_text_expr(other_col, "url"),
             self._json_text_expr(other_col, "request_url"),
+            "''",
+        ]) + "))"
+
+    def _request_conversion_expr(self, other_col: str) -> str:
+        """Best-effort request conversion extraction from NewAPI logs.other."""
+        return "LOWER(COALESCE(" + ", ".join([
+            self._json_text_expr(other_col, "请求转换"),
+            self._json_text_expr(other_col, "request_conversion"),
+            self._json_text_expr(other_col, "conversion"),
+            self._json_text_expr(other_col, "request_format"),
+            self._json_text_expr(other_col, "request_relay_format"),
+            self._json_text_expr(other_col, "final_request_relay_format"),
+            self._json_text_expr(other_col, "relay_format"),
             "''",
         ]) + "))"
 
@@ -354,7 +368,7 @@ class ModelStatusService:
         """
 
     def _cache_denominator_sum_select(self, alias: str = "") -> str:
-        """Build cache hit denominator, with Anthropic messages path adjustment."""
+        """Build cache hit denominator, with Anthropic messages format adjustment."""
         prefix = f"{alias}." if alias else ""
         type_col = f"{prefix}type"
         prompt_col = f"{prefix}prompt_tokens"
@@ -364,11 +378,16 @@ class ModelStatusService:
         other_col = f"{prefix}other"
         cache_tokens = self._json_number_expr(other_col, "cache_tokens")
         request_path = self._request_path_expr(other_col)
+        request_conversion = self._request_conversion_expr(other_col)
         return f"""
             COALESCE(SUM(CASE
                 WHEN {type_col} = :type_success
                 THEN COALESCE({prompt_col}, 0) + CASE
-                    WHEN {request_path} LIKE '%/v1/messages%' THEN COALESCE(({cache_tokens}), 0)
+                    WHEN {request_conversion} LIKE '%-> claude messages%'
+                         OR {request_conversion} LIKE '%->claude messages%'
+                         OR {request_conversion} = 'claude messages'
+                         OR ({request_conversion} = '' AND {request_path} LIKE '%/v1/messages%')
+                    THEN COALESCE(({cache_tokens}), 0)
                     ELSE 0
                 END
                 ELSE 0

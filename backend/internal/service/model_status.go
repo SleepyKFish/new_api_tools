@@ -170,7 +170,32 @@ func (s *ModelStatusService) jsonTextExpr(jsonExpr, key string) string {
 }
 
 func (s *ModelStatusService) requestPathExpr(otherCol string) string {
-	keys := []string{"request_path", "path", "endpoint", "url", "request_url"}
+	keys := []string{
+		"请求路径",
+		"request_path",
+		"path",
+		"endpoint",
+		"url",
+		"request_url",
+	}
+	parts := make([]string, 0, len(keys)+1)
+	for _, key := range keys {
+		parts = append(parts, s.jsonTextExpr(otherCol, key))
+	}
+	parts = append(parts, "''")
+	return fmt.Sprintf("LOWER(COALESCE(%s))", strings.Join(parts, ", "))
+}
+
+func (s *ModelStatusService) requestConversionExpr(otherCol string) string {
+	keys := []string{
+		"请求转换",
+		"request_conversion",
+		"conversion",
+		"request_format",
+		"request_relay_format",
+		"final_request_relay_format",
+		"relay_format",
+	}
 	parts := make([]string, 0, len(keys)+1)
 	for _, key := range keys {
 		parts = append(parts, s.jsonTextExpr(otherCol, key))
@@ -215,14 +240,19 @@ func (s *ModelStatusService) cacheDenominatorSumSelect(alias string) string {
 	otherCol := prefix + "other"
 	cacheTokensExpr := s.jsonNumberExpr(otherCol, "cache_tokens")
 	requestPathExpr := s.requestPathExpr(otherCol)
+	requestConversionExpr := s.requestConversionExpr(otherCol)
 	return fmt.Sprintf(`COALESCE(SUM(CASE
 		WHEN %s = 2
 		THEN COALESCE(%s, 0) + CASE
-			WHEN %s LIKE '%%/v1/messages%%' THEN COALESCE((%s), 0)
+			WHEN %s LIKE '%%-> claude messages%%'
+				OR %s LIKE '%%->claude messages%%'
+				OR %s = 'claude messages'
+				OR (%s = '' AND %s LIKE '%%/v1/messages%%')
+			THEN COALESCE((%s), 0)
 			ELSE 0
 		END
 		ELSE 0
-	END), 0) as cache_denominator_sum`, typeCol, promptCol, requestPathExpr, cacheTokensExpr)
+	END), 0) as cache_denominator_sum`, typeCol, promptCol, requestConversionExpr, requestConversionExpr, requestConversionExpr, requestConversionExpr, requestPathExpr, cacheTokensExpr)
 }
 
 // ModelStatusService handles model availability monitoring

@@ -325,7 +325,7 @@ function formatRate(value: number | null): string {
 }
 
 function formatTps(value: number | null): string {
-  return value == null ? '--' : `${value.toFixed(2)} tok/s`
+  return value == null ? '--' : value.toFixed(2)
 }
 
 const REFRESH_INTERVALS = [
@@ -1496,7 +1496,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                       <MetricPill label="总耗时" detail="≤10s占比" value={formatRate(channel.duration_within_10s_rate)} tone="emerald" />
                       <MetricPill label="总耗时" detail="≤20s占比" value={formatRate(channel.duration_within_20s_rate)} tone="blue" />
                       <MetricPill label="缓存" detail="命中率" value={formatRate(channel.cache_hit_rate)} tone="amber" />
-                      <MetricPill label="输出速度" value={formatTps(channel.completion_tps)} tone="amber" />
+                      <MetricPill label="输出速度" detail="tok/s" value={formatTps(channel.completion_tps)} tone="amber" />
                     </div>
                   </CardContent>
                 </Card>
@@ -2451,7 +2451,7 @@ function ModelStatusCard({ model, dragHandleProps }: ModelStatusCardProps) {
           <MetricPill label="总耗时" detail="≤10s占比" value={formatRate(model.duration_within_10s_rate)} tone="emerald" />
           <MetricPill label="总耗时" detail="≤20s占比" value={formatRate(model.duration_within_20s_rate)} tone="blue" />
           <MetricPill label="缓存" detail="命中率" value={formatRate(model.cache_hit_rate)} tone="amber" />
-          <MetricPill label="输出速度" value={formatTps(model.completion_tps)} tone="amber" />
+          <MetricPill label="输出速度" detail="tok/s" value={formatTps(model.completion_tps)} tone="amber" />
         </div>
 
         {/* Status grid - compact with rounded ends and staggered animation */}
