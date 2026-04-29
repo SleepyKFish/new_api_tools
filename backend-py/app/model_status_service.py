@@ -2,6 +2,7 @@
 Model Status Monitoring Service for NewAPI Middleware Tool.
 Provides sliding window status monitoring based on log data.
 """
+import json
 import time
 from dataclasses import dataclass, asdict, field
 from typing import Any, Dict, List, Optional, Tuple
@@ -32,6 +33,7 @@ TIME_WINDOWS = {
 }
 
 DEFAULT_TIME_WINDOW = "24h"
+PERFORMANCE_LOG_BATCH_SIZE = 5000
 
 
 @dataclass
@@ -120,6 +122,7 @@ class ModelStatusService:
     def __init__(self):
         self._db = get_db_manager()
         self._storage = get_local_storage()
+        self._schema_columns: Dict[str, bool] = {}  # cache column_exists lookups
         self._init_cache_table()
 
     def _init_cache_table(self):
@@ -213,6 +216,9 @@ class ModelStatusService:
 
     def _column_exists(self, table_name: str, column_name: str) -> bool:
         """Check whether a column exists in the upstream NewAPI database."""
+        cache_key = f"{table_name}.{column_name}"
+        if cache_key in self._schema_columns:
+            return self._schema_columns[cache_key]
         try:
             self._db.connect()
             if self._db.config.engine == DatabaseEngine.POSTGRESQL:
@@ -232,11 +238,14 @@ class ModelStatusService:
                       AND column_name = :column_name
                     LIMIT 1
                 """
-            return bool(self._db.execute(sql, {
+            result = bool(self._db.execute(sql, {
                 "table_name": table_name,
                 "column_name": column_name,
             }))
+            self._schema_columns[cache_key] = result
+            return result
         except Exception:
+            self._schema_columns[cache_key] = False
             return False
 
     def _first_token_time_expr(self, alias: str = "") -> str:
@@ -434,6 +443,262 @@ class ModelStatusService:
             END), 0) as cache_denominator_sum
         """
 
+    def _empty_performance_stats(self) -> Dict[str, float]:
+        """Raw performance counters used by Python-side log aggregation."""
+        return {
+            "success_requests": 0,
+            "timed_requests": 0,
+            "within_5s": 0,
+            "within_10s": 0,
+            "duration_timed_requests": 0,
+            "duration_within_10s": 0,
+            "duration_within_20s": 0,
+            "output_requests": 0,
+            "cache_denominator_sum": 0.0,
+            "cache_tokens_sum": 0.0,
+            "completion_tokens_sum": 0.0,
+            "use_time_sum": 0.0,
+        }
+
+    def _performance_summary_from_stats(self, stats: Dict[str, float]) -> Dict[str, Any]:
+        """Convert Python-side aggregate counters into frontend metrics."""
+        return self._build_performance_summary(
+            total_requests=int(stats.get("success_requests") or 0),
+            timed_requests=int(stats.get("timed_requests") or 0),
+            output_requests=int(stats.get("output_requests") or 0),
+            within_5s=int(stats.get("within_5s") or 0),
+            within_10s=int(stats.get("within_10s") or 0),
+            duration_timed_requests=int(stats.get("duration_timed_requests") or 0),
+            duration_within_10s=int(stats.get("duration_within_10s") or 0),
+            duration_within_20s=int(stats.get("duration_within_20s") or 0),
+            total_cache_denominator_tokens=float(stats.get("cache_denominator_sum") or 0),
+            total_cache_tokens=float(stats.get("cache_tokens_sum") or 0),
+            total_completion_tokens=float(stats.get("completion_tokens_sum") or 0),
+            total_use_time=float(stats.get("use_time_sum") or 0),
+        )
+
+    def _safe_float(self, value: Any) -> float:
+        """Convert loosely typed DB/JSON numeric values to float."""
+        if value is None:
+            return 0.0
+        if isinstance(value, bool):
+            return 1.0 if value else 0.0
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _safe_bool(self, value: Any) -> bool:
+        """Convert DB/JSON boolean-ish values to bool."""
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        if isinstance(value, str):
+            return value.strip().lower() in {"true", "1", "yes", "y", "on"}
+        return False
+
+    def _parse_other_json(self, value: Any) -> Dict[str, Any]:
+        """Parse NewAPI logs.other once per row."""
+        if isinstance(value, dict):
+            return value
+        if not isinstance(value, str):
+            return {}
+        raw = value.strip()
+        if not raw or raw.lower() == "null":
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    def _other_text(self, other: Dict[str, Any], keys: List[str]) -> str:
+        """Read a text-like value from logs.other."""
+        for key in keys:
+            value = other.get(key)
+            if value is None:
+                continue
+            if isinstance(value, list):
+                return " -> ".join(str(item) for item in value if item is not None)
+            return str(value)
+        return ""
+
+    def _is_claude_messages_request(self, other: Dict[str, Any]) -> bool:
+        """
+        Detect whether NewAPI finally sent a Claude Messages request.
+
+        Prefer NewAPI's upstream conversion marker / claude flag. Fall back to
+        request_path only when conversion is absent.
+        """
+        if self._safe_bool(other.get("claude")):
+            return True
+
+        conversion_value = None
+        for key in [
+            "request_conversion",
+            "conversion",
+            "request_format",
+            "request_relay_format",
+            "final_request_relay_format",
+            "relay_format",
+        ]:
+            if other.get(key) is not None:
+                conversion_value = other.get(key)
+                break
+
+        if isinstance(conversion_value, list):
+            conversion_items = [str(item).strip().lower() for item in conversion_value if item is not None]
+            if conversion_items:
+                return conversion_items[-1] == "claude messages"
+        elif conversion_value is not None:
+            conversion_text = str(conversion_value).strip().lower()
+            if (
+                conversion_text == "claude messages"
+                or "-> claude messages" in conversion_text
+                or "->claude messages" in conversion_text
+            ):
+                return True
+
+        request_path = self._other_text(other, [
+            "请求路径",
+            "request_path",
+            "path",
+            "endpoint",
+            "url",
+            "request_url",
+        ]).lower()
+        return "/v1/messages" in request_path
+
+    def _accumulate_performance_row(self, stats: Dict[str, float], row: Dict[str, Any]) -> None:
+        """Accumulate one logs row into raw performance counters."""
+        if int(row.get("type") or 0) != LOG_TYPE_CONSUMPTION:
+            return
+
+        stats["success_requests"] += 1
+
+        use_time = self._safe_float(row.get("use_time"))
+        prompt_tokens = self._safe_float(row.get("prompt_tokens"))
+        completion_tokens = self._safe_float(row.get("completion_tokens"))
+        is_stream = self._safe_bool(row.get("is_stream"))
+        other = self._parse_other_json(row.get("other"))
+        frt_seconds = self._safe_float(other.get("frt")) / 1000.0
+
+        first_token_time = frt_seconds if is_stream and frt_seconds > 0 else use_time
+        if first_token_time > 0:
+            stats["timed_requests"] += 1
+            if first_token_time <= 5:
+                stats["within_5s"] += 1
+            if first_token_time <= 10:
+                stats["within_10s"] += 1
+
+        if use_time > 0:
+            stats["duration_timed_requests"] += 1
+            if use_time <= 10:
+                stats["duration_within_10s"] += 1
+            if use_time <= 20:
+                stats["duration_within_20s"] += 1
+
+        if completion_tokens > 0 and use_time > 0:
+            effective_time = use_time
+            if is_stream and frt_seconds > 0:
+                effective_time = max(use_time - frt_seconds, 1.0)
+            stats["output_requests"] += 1
+            stats["completion_tokens_sum"] += completion_tokens
+            stats["use_time_sum"] += effective_time
+
+        cache_tokens = self._safe_float(other.get("cache_tokens"))
+        if cache_tokens > 0:
+            stats["cache_tokens_sum"] += cache_tokens
+
+        if self._is_claude_messages_request(other):
+            stats["cache_denominator_sum"] += prompt_tokens + cache_tokens
+        else:
+            stats["cache_denominator_sum"] += max(prompt_tokens, cache_tokens)
+
+    def _performance_log_columns(self, alias: str = "") -> List[str]:
+        """Columns needed for Python-side performance aggregation."""
+        prefix = f"{alias}." if alias else ""
+        columns = [
+            f"{prefix}id",
+            f"{prefix}created_at",
+            f"{prefix}model_name",
+            f"{prefix}channel_id",
+            f"{prefix}type",
+            f"{prefix}use_time",
+            f"{prefix}prompt_tokens",
+            f"{prefix}completion_tokens",
+        ]
+        if self._column_exists("logs", "is_stream"):
+            columns.append(f"{prefix}is_stream")
+        else:
+            columns.append("0 as is_stream")
+        if self._column_exists("logs", "other"):
+            columns.append(f"{prefix}other")
+        else:
+            columns.append("NULL as other")
+        return columns
+
+    def _fetch_performance_log_batch(
+        self,
+        window_start: int,
+        now: int,
+        cursor_created_at: int,
+        cursor_id: int,
+        model_names: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Fetch one light raw-log batch for application-side aggregation."""
+        model_filter = ""
+        params: Dict[str, Any] = {
+            "window_start": window_start,
+            "now": now,
+            "cursor_created_at": cursor_created_at,
+            "cursor_id": cursor_id,
+            "type_success": LOG_TYPE_CONSUMPTION,
+            "type_failure": LOG_TYPE_FAILURE,
+            "limit": PERFORMANCE_LOG_BATCH_SIZE,
+        }
+        if model_names:
+            model_placeholders = ", ".join([f":perf_model_{i}" for i in range(len(model_names))])
+            model_filter = f"AND model_name IN ({model_placeholders})"
+            for i, model_name in enumerate(model_names):
+                params[f"perf_model_{i}"] = model_name
+
+        sql = f"""
+            SELECT {", ".join(self._performance_log_columns())}
+            FROM logs
+            WHERE created_at >= :window_start
+              AND created_at < :now
+              AND type IN (:type_success, :type_failure)
+              AND (
+                  created_at > :cursor_created_at
+                  OR (created_at = :cursor_created_at AND id > :cursor_id)
+              )
+              {model_filter}
+            ORDER BY created_at ASC, id ASC
+            LIMIT :limit
+        """
+        return self._db.execute(sql, params)
+
+    def _get_channel_name_map(self, channel_ids: List[int]) -> Dict[int, str]:
+        """Load channel names for channel performance summaries."""
+        channel_ids = sorted({channel_id for channel_id in channel_ids if channel_id > 0})
+        if not channel_ids:
+            return {}
+
+        placeholders = ", ".join([f":channel_id_{i}" for i in range(len(channel_ids))])
+        params = {f"channel_id_{i}": channel_id for i, channel_id in enumerate(channel_ids)}
+        sql = f"""
+            SELECT id, COALESCE(name, '') as name
+            FROM channels
+            WHERE id IN ({placeholders})
+        """
+        rows = self._db.execute(sql, params)
+        return {
+            int(row.get("id") or 0): row.get("name") or f"Channel#{row.get('id')}"
+            for row in rows
+        }
+
     def _get_model_performance_map(
         self,
         model_names: List[str],
@@ -444,68 +709,37 @@ class ModelStatusService:
         if not model_names:
             return {}
 
-        model_placeholders = ", ".join([f":perf_model_{i}" for i in range(len(model_names))])
-        first_token_time = self._first_token_time_expr()
-        effective_gen_time = self._effective_generation_time_expr()
-        cache_tokens_sum_select = self._cache_tokens_sum_select()
-        cache_denominator_sum_select = self._cache_denominator_sum_select()
-        sql = f"""
-            SELECT
-                model_name,
-                SUM(CASE WHEN type = :type_success THEN 1 ELSE 0 END) as success_requests,
-                SUM(CASE WHEN type = :type_success AND ({first_token_time}) > 0 THEN 1 ELSE 0 END) as timed_requests,
-                SUM(CASE WHEN type = :type_success AND ({first_token_time}) > 0 AND ({first_token_time}) <= 5 THEN 1 ELSE 0 END) as within_5s,
-                SUM(CASE WHEN type = :type_success AND ({first_token_time}) > 0 AND ({first_token_time}) <= 10 THEN 1 ELSE 0 END) as within_10s,
-                SUM(CASE WHEN type = :type_success AND use_time > 0 THEN 1 ELSE 0 END) as duration_timed_requests,
-                SUM(CASE WHEN type = :type_success AND use_time > 0 AND use_time <= 10 THEN 1 ELSE 0 END) as duration_within_10s,
-                SUM(CASE WHEN type = :type_success AND use_time > 0 AND use_time <= 20 THEN 1 ELSE 0 END) as duration_within_20s,
-                SUM(CASE WHEN type = :type_success AND completion_tokens > 0 AND use_time > 0 THEN 1 ELSE 0 END) as output_requests,
-                {cache_denominator_sum_select},
-                {cache_tokens_sum_select},
-                COALESCE(SUM(CASE WHEN type = :type_success AND completion_tokens > 0 AND use_time > 0 THEN completion_tokens ELSE 0 END), 0) as completion_tokens_sum,
-                COALESCE(SUM(CASE WHEN type = :type_success AND completion_tokens > 0 AND use_time > 0 THEN ({effective_gen_time}) ELSE 0 END), 0) as use_time_sum
-            FROM logs
-            WHERE model_name IN ({model_placeholders})
-              AND created_at >= :window_start
-              AND created_at < :now
-              AND type IN (:type_success, :type_failure)
-            GROUP BY model_name
-        """
-        params = {
-            "window_start": window_start,
-            "now": now,
-            "type_success": LOG_TYPE_CONSUMPTION,
-            "type_failure": LOG_TYPE_FAILURE,
-        }
-        for i, model_name in enumerate(model_names):
-            params[f"perf_model_{i}"] = model_name
-
-        performance_map = {}
+        stats_by_model = {model_name: self._empty_performance_stats() for model_name in model_names}
+        cursor_created_at = window_start - 1
+        cursor_id = 0
         try:
             self._db.connect()
-            result = self._db.execute(sql, params)
-            for row in result:
-                model_name = row.get("model_name")
-                if not model_name:
-                    continue
-                performance_map[model_name] = self._build_performance_summary(
-                    total_requests=int(row.get("success_requests") or 0),
-                    timed_requests=int(row.get("timed_requests") or 0),
-                    output_requests=int(row.get("output_requests") or 0),
-                    within_5s=int(row.get("within_5s") or 0),
-                    within_10s=int(row.get("within_10s") or 0),
-                    duration_timed_requests=int(row.get("duration_timed_requests") or 0),
-                    duration_within_10s=int(row.get("duration_within_10s") or 0),
-                    duration_within_20s=int(row.get("duration_within_20s") or 0),
-                    total_cache_denominator_tokens=float(row.get("cache_denominator_sum") or 0),
-                    total_cache_tokens=float(row.get("cache_tokens_sum") or 0),
-                    total_completion_tokens=float(row.get("completion_tokens_sum") or 0),
-                    total_use_time=float(row.get("use_time_sum") or 0),
+            while True:
+                rows = self._fetch_performance_log_batch(
+                    window_start=window_start,
+                    now=now,
+                    cursor_created_at=cursor_created_at,
+                    cursor_id=cursor_id,
+                    model_names=model_names,
                 )
+                if not rows:
+                    break
+                for row in rows:
+                    model_name = row.get("model_name")
+                    if model_name in stats_by_model:
+                        self._accumulate_performance_row(stats_by_model[model_name], row)
+                last_row = rows[-1]
+                cursor_created_at = int(last_row.get("created_at") or cursor_created_at)
+                cursor_id = int(last_row.get("id") or cursor_id)
+                if len(rows) < PERFORMANCE_LOG_BATCH_SIZE:
+                    break
         except Exception as e:
             logger.db_error(f"批量获取模型性能摘要失败: {e}")
 
-        return performance_map
+        return {
+            model_name: self._performance_summary_from_stats(stats)
+            for model_name, stats in stats_by_model.items()
+        }
 
     def get_channel_performance_summaries(
         self,
@@ -525,64 +759,43 @@ class ModelStatusService:
         now = int(time.time())
         total_seconds, _, _ = get_time_window_config(time_window)
         window_start = now - total_seconds
-        first_token_time = self._first_token_time_expr("l")
-        effective_gen_time = self._effective_generation_time_expr("l")
-        cache_tokens_sum_select = self._cache_tokens_sum_select("l")
-        cache_denominator_sum_select = self._cache_denominator_sum_select("l")
-
-        sql = f"""
-            SELECT
-                c.id as channel_id,
-                COALESCE(c.name, '') as channel_name,
-                SUM(CASE WHEN l.type = :type_success THEN 1 ELSE 0 END) as success_requests,
-                SUM(CASE WHEN l.type = :type_success AND ({first_token_time}) > 0 THEN 1 ELSE 0 END) as timed_requests,
-                SUM(CASE WHEN l.type = :type_success AND ({first_token_time}) > 0 AND ({first_token_time}) <= 5 THEN 1 ELSE 0 END) as within_5s,
-                SUM(CASE WHEN l.type = :type_success AND ({first_token_time}) > 0 AND ({first_token_time}) <= 10 THEN 1 ELSE 0 END) as within_10s,
-                SUM(CASE WHEN l.type = :type_success AND l.use_time > 0 THEN 1 ELSE 0 END) as duration_timed_requests,
-                SUM(CASE WHEN l.type = :type_success AND l.use_time > 0 AND l.use_time <= 10 THEN 1 ELSE 0 END) as duration_within_10s,
-                SUM(CASE WHEN l.type = :type_success AND l.use_time > 0 AND l.use_time <= 20 THEN 1 ELSE 0 END) as duration_within_20s,
-                SUM(CASE WHEN l.type = :type_success AND l.completion_tokens > 0 AND l.use_time > 0 THEN 1 ELSE 0 END) as output_requests,
-                {cache_denominator_sum_select},
-                {cache_tokens_sum_select},
-                COALESCE(SUM(CASE WHEN l.type = :type_success AND l.completion_tokens > 0 AND l.use_time > 0 THEN l.completion_tokens ELSE 0 END), 0) as completion_tokens_sum,
-                COALESCE(SUM(CASE WHEN l.type = :type_success AND l.completion_tokens > 0 AND l.use_time > 0 THEN ({effective_gen_time}) ELSE 0 END), 0) as use_time_sum
-            FROM logs l
-            INNER JOIN channels c ON c.id = l.channel_id
-            WHERE l.created_at >= :window_start
-              AND l.created_at < :now
-              AND l.type IN (:type_success, :type_failure)
-            GROUP BY c.id, c.name
-            HAVING SUM(CASE WHEN l.type = :type_success THEN 1 ELSE 0 END) > 0
-            ORDER BY success_requests DESC, channel_id ASC
-        """
-
+        stats_by_channel: Dict[int, Dict[str, float]] = {}
         channels: List[ChannelPerformanceSummary] = []
         try:
             self._db.connect()
-            result = self._db.execute(sql, {
-                "window_start": window_start,
-                "now": now,
-                "type_success": LOG_TYPE_CONSUMPTION,
-                "type_failure": LOG_TYPE_FAILURE,
-            })
-            for row in result:
-                perf = self._build_performance_summary(
-                    total_requests=int(row.get("success_requests") or 0),
-                    timed_requests=int(row.get("timed_requests") or 0),
-                    output_requests=int(row.get("output_requests") or 0),
-                    within_5s=int(row.get("within_5s") or 0),
-                    within_10s=int(row.get("within_10s") or 0),
-                    duration_timed_requests=int(row.get("duration_timed_requests") or 0),
-                    duration_within_10s=int(row.get("duration_within_10s") or 0),
-                    duration_within_20s=int(row.get("duration_within_20s") or 0),
-                    total_cache_denominator_tokens=float(row.get("cache_denominator_sum") or 0),
-                    total_cache_tokens=float(row.get("cache_tokens_sum") or 0),
-                    total_completion_tokens=float(row.get("completion_tokens_sum") or 0),
-                    total_use_time=float(row.get("use_time_sum") or 0),
+            cursor_created_at = window_start - 1
+            cursor_id = 0
+            while True:
+                rows = self._fetch_performance_log_batch(
+                    window_start=window_start,
+                    now=now,
+                    cursor_created_at=cursor_created_at,
+                    cursor_id=cursor_id,
                 )
+                if not rows:
+                    break
+                for row in rows:
+                    channel_id = int(row.get("channel_id") or 0)
+                    stats = stats_by_channel.setdefault(channel_id, self._empty_performance_stats())
+                    self._accumulate_performance_row(stats, row)
+                last_row = rows[-1]
+                cursor_created_at = int(last_row.get("created_at") or cursor_created_at)
+                cursor_id = int(last_row.get("id") or cursor_id)
+                if len(rows) < PERFORMANCE_LOG_BATCH_SIZE:
+                    break
+
+            channel_names = self._get_channel_name_map(list(stats_by_channel.keys()))
+            ordered_channel_stats = sorted(
+                stats_by_channel.items(),
+                key=lambda item: (-int(item[1].get("success_requests") or 0), item[0]),
+            )
+            for channel_id, stats in ordered_channel_stats:
+                if int(stats.get("success_requests") or 0) <= 0:
+                    continue
+                perf = self._performance_summary_from_stats(stats)
                 channels.append(ChannelPerformanceSummary(
-                    channel_id=int(row.get("channel_id") or 0),
-                    channel_name=row.get("channel_name") or f"Channel#{row.get('channel_id')}",
+                    channel_id=channel_id,
+                    channel_name=channel_names.get(channel_id) or f"Channel#{channel_id}",
                     total_requests=perf["total_requests"],
                     within_5s_rate=perf["within_5s_rate"],
                     within_10s_rate=perf["within_10s_rate"],
