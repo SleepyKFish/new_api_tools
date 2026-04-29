@@ -196,7 +196,7 @@ class ModelStatusService:
         within_10s_rate = round(within_10s / timed_requests * 100, 2) if timed_requests > 0 else None
         duration_within_10s_rate = round(duration_within_10s / duration_timed_requests * 100, 2) if duration_timed_requests > 0 else None
         duration_within_20s_rate = round(duration_within_20s / duration_timed_requests * 100, 2) if duration_timed_requests > 0 else None
-        cache_hit_rate = round(total_cache_tokens / total_cache_denominator_tokens * 100, 2) if total_cache_denominator_tokens > 0 else None
+        cache_hit_rate = round(min(total_cache_tokens, total_cache_denominator_tokens) / total_cache_denominator_tokens * 100, 2) if total_cache_denominator_tokens > 0 else None
         completion_tps = round(total_completion_tokens / total_use_time, 2) if total_use_time > 0 else None
         return {
             "total_requests": total_requests,
@@ -337,7 +337,6 @@ class ModelStatusService:
     def _request_conversion_expr(self, other_col: str) -> str:
         """Best-effort request conversion extraction from NewAPI logs.other."""
         return "LOWER(COALESCE(" + ", ".join([
-            self._json_text_expr(other_col, "请求转换"),
             self._json_text_expr(other_col, "request_conversion"),
             self._json_text_expr(other_col, "conversion"),
             self._json_text_expr(other_col, "request_format"),
@@ -346,6 +345,10 @@ class ModelStatusService:
             self._json_text_expr(other_col, "relay_format"),
             "''",
         ]) + "))"
+
+    def _json_bool_expr(self, json_expr: str, key: str) -> str:
+        """Build a SQL expression that extracts a boolean-ish JSON value."""
+        return f"LOWER(COALESCE({self._json_text_expr(json_expr, key)}, '')) IN ('true', '1')"
 
     def _cache_tokens_sum_select(self, alias: str = "") -> str:
         """Build a cache token aggregate that is safe for older NewAPI schemas."""
@@ -379,16 +382,18 @@ class ModelStatusService:
         cache_tokens = self._json_number_expr(other_col, "cache_tokens")
         request_path = self._request_path_expr(other_col)
         request_conversion = self._request_conversion_expr(other_col)
+        is_claude = self._json_bool_expr(other_col, "claude")
         return f"""
             COALESCE(SUM(CASE
                 WHEN {type_col} = :type_success
-                THEN COALESCE({prompt_col}, 0) + CASE
-                    WHEN {request_conversion} LIKE '%-> claude messages%'
+                THEN CASE
+                    WHEN {is_claude}
+                         OR {request_conversion} LIKE '%-> claude messages%'
                          OR {request_conversion} LIKE '%->claude messages%'
                          OR {request_conversion} = 'claude messages'
                          OR ({request_conversion} = '' AND {request_path} LIKE '%/v1/messages%')
-                    THEN COALESCE(({cache_tokens}), 0)
-                    ELSE 0
+                    THEN COALESCE({prompt_col}, 0) + COALESCE(({cache_tokens}), 0)
+                    ELSE GREATEST(COALESCE({prompt_col}, 0), COALESCE(({cache_tokens}), 0))
                 END
                 ELSE 0
             END), 0) as cache_denominator_sum

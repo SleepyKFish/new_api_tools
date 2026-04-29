@@ -82,7 +82,11 @@ func buildPerformanceSummary(totalRequests, timedRequests, outputRequests, withi
 		durationWithin20sRate = roundRate(float64(durationWithin20s) / float64(durationTimedRequests) * 100)
 	}
 	if cacheDenominatorSum > 0 {
-		cacheHitRate = roundRate(float64(cacheTokensSum) / float64(cacheDenominatorSum) * 100)
+		cacheHitTokens := cacheTokensSum
+		if cacheHitTokens > cacheDenominatorSum {
+			cacheHitTokens = cacheDenominatorSum
+		}
+		cacheHitRate = roundRate(float64(cacheHitTokens) / float64(cacheDenominatorSum) * 100)
 	}
 	if useTimeSum > 0 {
 		completionTPS = roundRate(float64(completionTokensSum) / float64(useTimeSum))
@@ -188,7 +192,6 @@ func (s *ModelStatusService) requestPathExpr(otherCol string) string {
 
 func (s *ModelStatusService) requestConversionExpr(otherCol string) string {
 	keys := []string{
-		"请求转换",
 		"request_conversion",
 		"conversion",
 		"request_format",
@@ -202,6 +205,10 @@ func (s *ModelStatusService) requestConversionExpr(otherCol string) string {
 	}
 	parts = append(parts, "''")
 	return fmt.Sprintf("LOWER(COALESCE(%s))", strings.Join(parts, ", "))
+}
+
+func (s *ModelStatusService) jsonBoolExpr(jsonExpr, key string) string {
+	return fmt.Sprintf("LOWER(COALESCE(%s, '')) IN ('true', '1')", s.jsonTextExpr(jsonExpr, key))
 }
 
 func (s *ModelStatusService) cacheTokensSumSelect(alias string) string {
@@ -241,18 +248,20 @@ func (s *ModelStatusService) cacheDenominatorSumSelect(alias string) string {
 	cacheTokensExpr := s.jsonNumberExpr(otherCol, "cache_tokens")
 	requestPathExpr := s.requestPathExpr(otherCol)
 	requestConversionExpr := s.requestConversionExpr(otherCol)
+	isClaudeExpr := s.jsonBoolExpr(otherCol, "claude")
 	return fmt.Sprintf(`COALESCE(SUM(CASE
 		WHEN %s = 2
-		THEN COALESCE(%s, 0) + CASE
-			WHEN %s LIKE '%%-> claude messages%%'
+		THEN CASE
+			WHEN %s
+				OR %s LIKE '%%-> claude messages%%'
 				OR %s LIKE '%%->claude messages%%'
 				OR %s = 'claude messages'
 				OR (%s = '' AND %s LIKE '%%/v1/messages%%')
-			THEN COALESCE((%s), 0)
-			ELSE 0
+			THEN COALESCE(%s, 0) + COALESCE((%s), 0)
+			ELSE GREATEST(COALESCE(%s, 0), COALESCE((%s), 0))
 		END
 		ELSE 0
-	END), 0) as cache_denominator_sum`, typeCol, promptCol, requestConversionExpr, requestConversionExpr, requestConversionExpr, requestConversionExpr, requestPathExpr, cacheTokensExpr)
+	END), 0) as cache_denominator_sum`, typeCol, isClaudeExpr, requestConversionExpr, requestConversionExpr, requestConversionExpr, requestConversionExpr, requestPathExpr, promptCol, cacheTokensExpr, promptCol, cacheTokensExpr)
 }
 
 // ModelStatusService handles model availability monitoring
