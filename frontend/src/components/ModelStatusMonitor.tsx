@@ -37,8 +37,11 @@ interface ModelStatus {
   current_status: 'green' | 'yellow' | 'red'
   within_5s_rate: number | null
   within_10s_rate: number | null
+  duration_within_10s_rate: number | null
+  duration_within_20s_rate: number | null
   completion_tps: number | null
   timed_requests: number
+  duration_timed_requests: number
   output_requests: number
   slot_data: SlotStatus[]
 }
@@ -49,8 +52,11 @@ interface ChannelPerformance {
   total_requests: number
   within_5s_rate: number | null
   within_10s_rate: number | null
+  duration_within_10s_rate: number | null
+  duration_within_20s_rate: number | null
   completion_tps: number | null
   timed_requests: number
+  duration_timed_requests: number
   output_requests: number
 }
 
@@ -1454,7 +1460,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
               <div>
                 <h3 className="text-sm font-semibold tracking-tight">渠道性能摘要</h3>
                 <p className="text-xs text-muted-foreground mt-1">
-                  基于成功请求统计 5 秒内、10 秒内返回比例与输出速度
+                  基于成功请求统计首 Token、总返回耗时比例与输出速度
                 </p>
               </div>
               <Badge variant="outline" className="font-normal">
@@ -1476,14 +1482,17 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                         </div>
                       </div>
                       <div className="text-right text-[11px] text-muted-foreground">
-                        <div>计时样本 {channel.timed_requests.toLocaleString()}</div>
+                        <div>首Token样本 {channel.timed_requests.toLocaleString()}</div>
+                        <div>耗时样本 {channel.duration_timed_requests.toLocaleString()}</div>
                         <div>输出样本 {channel.output_requests.toLocaleString()}</div>
                       </div>
                     </div>
 
-                    <div className="grid grid-cols-3 gap-2 mt-3">
-                      <MetricPill label="5s内返回" value={formatRate(channel.within_5s_rate)} tone="emerald" />
-                      <MetricPill label="10s内返回" value={formatRate(channel.within_10s_rate)} tone="blue" />
+                    <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 mt-3">
+                      <MetricPill label="5s首Token" value={formatRate(channel.within_5s_rate)} tone="emerald" />
+                      <MetricPill label="10s首Token" value={formatRate(channel.within_10s_rate)} tone="blue" />
+                      <MetricPill label="10s返回" value={formatRate(channel.duration_within_10s_rate)} tone="emerald" />
+                      <MetricPill label="20s返回" value={formatRate(channel.duration_within_20s_rate)} tone="blue" />
                       <MetricPill label="输出速度" value={formatTps(channel.completion_tps)} tone="amber" />
                     </div>
                   </CardContent>
@@ -2428,9 +2437,11 @@ function ModelStatusCard({ model, dragHandleProps }: ModelStatusCardProps) {
           </div>
         </div>
 
-        <div className="grid grid-cols-3 gap-2 mb-3">
-          <MetricPill label="5s内返回" value={formatRate(model.within_5s_rate)} tone="emerald" />
-          <MetricPill label="10s内返回" value={formatRate(model.within_10s_rate)} tone="blue" />
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 mb-3">
+          <MetricPill label="5s首Token" value={formatRate(model.within_5s_rate)} tone="emerald" />
+          <MetricPill label="10s首Token" value={formatRate(model.within_10s_rate)} tone="blue" />
+          <MetricPill label="10s返回" value={formatRate(model.duration_within_10s_rate)} tone="emerald" />
+          <MetricPill label="20s返回" value={formatRate(model.duration_within_20s_rate)} tone="blue" />
           <MetricPill label="输出速度" value={formatTps(model.completion_tps)} tone="amber" />
         </div>
 

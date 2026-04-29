@@ -14,7 +14,7 @@ import (
 var (
 	AvailableTimeWindows = []string{"15m", "30m", "1h", "6h", "12h", "24h"}
 	DefaultTimeWindow    = "24h"
-	AvailableThemes = []string{
+	AvailableThemes      = []string{
 		"daylight", "obsidian", "minimal", "neon", "forest", "ocean", "terminal",
 		"cupertino", "material", "openai", "anthropic", "vercel", "linear",
 		"stripe", "github", "discord", "tesla",
@@ -65,27 +65,73 @@ func roundRate(rate float64) float64 {
 	return math.Round(rate*100) / 100
 }
 
-func buildPerformanceSummary(totalRequests, timedRequests, outputRequests, within5s, within10s, completionTokensSum, useTimeSum int64) map[string]interface{} {
+func buildPerformanceSummary(totalRequests, timedRequests, outputRequests, within5s, within10s, durationTimedRequests, durationWithin10s, durationWithin20s, completionTokensSum, useTimeSum int64) map[string]interface{} {
 	var within5sRate interface{}
 	var within10sRate interface{}
+	var durationWithin10sRate interface{}
+	var durationWithin20sRate interface{}
 	var completionTPS interface{}
 
 	if timedRequests > 0 {
 		within5sRate = roundRate(float64(within5s) / float64(timedRequests) * 100)
 		within10sRate = roundRate(float64(within10s) / float64(timedRequests) * 100)
 	}
+	if durationTimedRequests > 0 {
+		durationWithin10sRate = roundRate(float64(durationWithin10s) / float64(durationTimedRequests) * 100)
+		durationWithin20sRate = roundRate(float64(durationWithin20s) / float64(durationTimedRequests) * 100)
+	}
 	if useTimeSum > 0 {
 		completionTPS = roundRate(float64(completionTokensSum) / float64(useTimeSum))
 	}
 
 	return map[string]interface{}{
-		"total_requests":   totalRequests,
-		"within_5s_rate":   within5sRate,
-		"within_10s_rate":  within10sRate,
-		"completion_tps":   completionTPS,
-		"timed_requests":   timedRequests,
-		"output_requests":  outputRequests,
+		"total_requests":           totalRequests,
+		"within_5s_rate":           within5sRate,
+		"within_10s_rate":          within10sRate,
+		"duration_within_10s_rate": durationWithin10sRate,
+		"duration_within_20s_rate": durationWithin20sRate,
+		"completion_tps":           completionTPS,
+		"timed_requests":           timedRequests,
+		"duration_timed_requests":  durationTimedRequests,
+		"output_requests":          outputRequests,
 	}
+}
+
+func (s *ModelStatusService) firstTokenTimeExpr(alias string) string {
+	prefix := ""
+	if alias != "" {
+		prefix = alias + "."
+	}
+	useTime := prefix + "use_time"
+	if !s.db.ColumnExists("logs", "is_stream") || !s.db.ColumnExists("logs", "other") {
+		return useTime
+	}
+
+	other := prefix + "other"
+	isStream := prefix + "is_stream"
+	if s.db.IsPG {
+		frtMS := fmt.Sprintf("CAST(CAST(NULLIF(NULLIF(%s, ''), 'null') AS jsonb)->>'frt' AS DOUBLE PRECISION)", other)
+		return fmt.Sprintf(`CASE
+			WHEN COALESCE(%s, false) = true
+				AND %s IS NOT NULL
+				AND %s <> ''
+				AND %s <> 'null'
+				AND COALESCE(%s, 0) > 0
+			THEN %s / 1000.0
+			ELSE %s
+		END`, isStream, other, other, other, frtMS, frtMS, useTime)
+	}
+
+	frtMS := fmt.Sprintf("CAST(JSON_UNQUOTE(JSON_EXTRACT(%s, '$.frt')) AS DECIMAL(20,6))", other)
+	return fmt.Sprintf(`CASE
+		WHEN COALESCE(%s, 0) = 1
+			AND %s IS NOT NULL
+			AND %s <> ''
+			AND JSON_VALID(%s)
+			AND COALESCE(%s, 0) > 0
+		THEN %s / 1000.0
+		ELSE %s
+	END`, isStream, other, other, other, frtMS, frtMS, useTime)
 }
 
 // ModelStatusService handles model availability monitoring
@@ -111,14 +157,18 @@ func (s *ModelStatusService) getModelPerformanceMap(modelNames []string, startTi
 		args = append(args, modelName)
 	}
 	args = append(args, startTime, now)
+	firstTokenTime := s.firstTokenTimeExpr("")
 
 	query := fmt.Sprintf(`
 		SELECT
 			model_name,
 			SUM(CASE WHEN type = 2 THEN 1 ELSE 0 END) as success_requests,
-			SUM(CASE WHEN type = 2 AND use_time > 0 THEN 1 ELSE 0 END) as timed_requests,
-			SUM(CASE WHEN type = 2 AND use_time > 0 AND use_time <= 5 THEN 1 ELSE 0 END) as within_5s,
-			SUM(CASE WHEN type = 2 AND use_time > 0 AND use_time <= 10 THEN 1 ELSE 0 END) as within_10s,
+			SUM(CASE WHEN type = 2 AND (%s) > 0 THEN 1 ELSE 0 END) as timed_requests,
+			SUM(CASE WHEN type = 2 AND (%s) > 0 AND (%s) <= 5 THEN 1 ELSE 0 END) as within_5s,
+			SUM(CASE WHEN type = 2 AND (%s) > 0 AND (%s) <= 10 THEN 1 ELSE 0 END) as within_10s,
+			SUM(CASE WHEN type = 2 AND use_time > 0 THEN 1 ELSE 0 END) as duration_timed_requests,
+			SUM(CASE WHEN type = 2 AND use_time > 0 AND use_time <= 10 THEN 1 ELSE 0 END) as duration_within_10s,
+			SUM(CASE WHEN type = 2 AND use_time > 0 AND use_time <= 20 THEN 1 ELSE 0 END) as duration_within_20s,
 			SUM(CASE WHEN type = 2 AND completion_tokens > 0 AND use_time > 0 THEN 1 ELSE 0 END) as output_requests,
 			COALESCE(SUM(CASE WHEN type = 2 AND completion_tokens > 0 AND use_time > 0 THEN completion_tokens ELSE 0 END), 0) as completion_tokens_sum,
 			COALESCE(SUM(CASE WHEN type = 2 AND completion_tokens > 0 AND use_time > 0 THEN use_time ELSE 0 END), 0) as use_time_sum
@@ -127,6 +177,9 @@ func (s *ModelStatusService) getModelPerformanceMap(modelNames []string, startTi
 			AND created_at >= %s AND created_at < %s
 			AND type IN (2, 5)
 		GROUP BY model_name`,
+		firstTokenTime,
+		firstTokenTime, firstTokenTime,
+		firstTokenTime, firstTokenTime,
 		strings.Join(placeholders, ", "),
 		s.db.Placeholder(len(modelNames)+1),
 		s.db.Placeholder(len(modelNames)+2),
@@ -148,6 +201,9 @@ func (s *ModelStatusService) getModelPerformanceMap(modelNames []string, startTi
 			toInt64(row["output_requests"]),
 			toInt64(row["within_5s"]),
 			toInt64(row["within_10s"]),
+			toInt64(row["duration_timed_requests"]),
+			toInt64(row["duration_within_10s"]),
+			toInt64(row["duration_within_20s"]),
 			toInt64(row["completion_tokens_sum"]),
 			toInt64(row["use_time_sum"]),
 		)
@@ -172,15 +228,19 @@ func (s *ModelStatusService) GetChannelPerformanceSummaries(window string) ([]ma
 
 	now := time.Now().Unix()
 	startTime := now - twConfig.totalSeconds
+	firstTokenTime := s.firstTokenTimeExpr("l")
 
-	query := s.db.RebindQuery(`
+	query := s.db.RebindQuery(fmt.Sprintf(`
 		SELECT
 			c.id as channel_id,
 			COALESCE(c.name, '') as channel_name,
 			SUM(CASE WHEN l.type = 2 THEN 1 ELSE 0 END) as success_requests,
-			SUM(CASE WHEN l.type = 2 AND l.use_time > 0 THEN 1 ELSE 0 END) as timed_requests,
-			SUM(CASE WHEN l.type = 2 AND l.use_time > 0 AND l.use_time <= 5 THEN 1 ELSE 0 END) as within_5s,
-			SUM(CASE WHEN l.type = 2 AND l.use_time > 0 AND l.use_time <= 10 THEN 1 ELSE 0 END) as within_10s,
+			SUM(CASE WHEN l.type = 2 AND (%s) > 0 THEN 1 ELSE 0 END) as timed_requests,
+			SUM(CASE WHEN l.type = 2 AND (%s) > 0 AND (%s) <= 5 THEN 1 ELSE 0 END) as within_5s,
+			SUM(CASE WHEN l.type = 2 AND (%s) > 0 AND (%s) <= 10 THEN 1 ELSE 0 END) as within_10s,
+			SUM(CASE WHEN l.type = 2 AND l.use_time > 0 THEN 1 ELSE 0 END) as duration_timed_requests,
+			SUM(CASE WHEN l.type = 2 AND l.use_time > 0 AND l.use_time <= 10 THEN 1 ELSE 0 END) as duration_within_10s,
+			SUM(CASE WHEN l.type = 2 AND l.use_time > 0 AND l.use_time <= 20 THEN 1 ELSE 0 END) as duration_within_20s,
 			SUM(CASE WHEN l.type = 2 AND l.completion_tokens > 0 AND l.use_time > 0 THEN 1 ELSE 0 END) as output_requests,
 			COALESCE(SUM(CASE WHEN l.type = 2 AND l.completion_tokens > 0 AND l.use_time > 0 THEN l.completion_tokens ELSE 0 END), 0) as completion_tokens_sum,
 			COALESCE(SUM(CASE WHEN l.type = 2 AND l.completion_tokens > 0 AND l.use_time > 0 THEN l.use_time ELSE 0 END), 0) as use_time_sum
@@ -190,7 +250,10 @@ func (s *ModelStatusService) GetChannelPerformanceSummaries(window string) ([]ma
 			AND l.type IN (2, 5)
 		GROUP BY c.id, c.name
 		HAVING SUM(CASE WHEN l.type = 2 THEN 1 ELSE 0 END) > 0
-		ORDER BY success_requests DESC, channel_id ASC`)
+		ORDER BY success_requests DESC, channel_id ASC`,
+		firstTokenTime,
+		firstTokenTime, firstTokenTime,
+		firstTokenTime, firstTokenTime))
 
 	rows, err := s.db.Query(query, startTime, now)
 	if err != nil {
@@ -205,6 +268,9 @@ func (s *ModelStatusService) GetChannelPerformanceSummaries(window string) ([]ma
 			toInt64(row["output_requests"]),
 			toInt64(row["within_5s"]),
 			toInt64(row["within_10s"]),
+			toInt64(row["duration_timed_requests"]),
+			toInt64(row["duration_within_10s"]),
+			toInt64(row["duration_within_20s"]),
 			toInt64(row["completion_tokens_sum"]),
 			toInt64(row["use_time_sum"]),
 		)
@@ -213,14 +279,17 @@ func (s *ModelStatusService) GetChannelPerformanceSummaries(window string) ([]ma
 			channelName = fmt.Sprintf("Channel#%d", toInt64(row["channel_id"]))
 		}
 		results = append(results, map[string]interface{}{
-			"channel_id":      toInt64(row["channel_id"]),
-			"channel_name":    channelName,
-			"total_requests":  perf["total_requests"],
-			"within_5s_rate":  perf["within_5s_rate"],
-			"within_10s_rate": perf["within_10s_rate"],
-			"completion_tps":  perf["completion_tps"],
-			"timed_requests":  perf["timed_requests"],
-			"output_requests": perf["output_requests"],
+			"channel_id":               toInt64(row["channel_id"]),
+			"channel_name":             channelName,
+			"total_requests":           perf["total_requests"],
+			"within_5s_rate":           perf["within_5s_rate"],
+			"within_10s_rate":          perf["within_10s_rate"],
+			"duration_within_10s_rate": perf["duration_within_10s_rate"],
+			"duration_within_20s_rate": perf["duration_within_20s_rate"],
+			"completion_tps":           perf["completion_tps"],
+			"timed_requests":           perf["timed_requests"],
+			"duration_timed_requests":  perf["duration_timed_requests"],
+			"output_requests":          perf["output_requests"],
 		})
 	}
 
@@ -379,21 +448,24 @@ func (s *ModelStatusService) GetModelStatus(modelName, window string) (map[strin
 	perf := s.getModelPerformanceMap([]string{modelName}, startTime, now)[modelName]
 
 	result := map[string]interface{}{
-		"model_name":     modelName,
-		"display_name":   modelName,
-		"time_window":    window,
-		"total_requests": totalReqs,
-		"success_count":  totalSuccess,
-		"failure_count":  totalFailure,
-		"empty_count":    totalEmpty,
-		"success_rate":   roundRate(overallRate),
-		"current_status": getStatusColor(overallRate, totalReqs),
-		"within_5s_rate": perf["within_5s_rate"],
-		"within_10s_rate": perf["within_10s_rate"],
-		"completion_tps": perf["completion_tps"],
-		"timed_requests": perf["timed_requests"],
-		"output_requests": perf["output_requests"],
-		"slot_data":      slotData,
+		"model_name":               modelName,
+		"display_name":             modelName,
+		"time_window":              window,
+		"total_requests":           totalReqs,
+		"success_count":            totalSuccess,
+		"failure_count":            totalFailure,
+		"empty_count":              totalEmpty,
+		"success_rate":             roundRate(overallRate),
+		"current_status":           getStatusColor(overallRate, totalReqs),
+		"within_5s_rate":           perf["within_5s_rate"],
+		"within_10s_rate":          perf["within_10s_rate"],
+		"duration_within_10s_rate": perf["duration_within_10s_rate"],
+		"duration_within_20s_rate": perf["duration_within_20s_rate"],
+		"completion_tps":           perf["completion_tps"],
+		"timed_requests":           perf["timed_requests"],
+		"duration_timed_requests":  perf["duration_timed_requests"],
+		"output_requests":          perf["output_requests"],
+		"slot_data":                slotData,
 	}
 
 	cm.Set(cacheKey, result, 30*time.Second)
@@ -418,8 +490,11 @@ func (s *ModelStatusService) GetMultipleModelsStatus(modelNames []string, window
 		if perf, ok := perfMap[name]; ok {
 			status["within_5s_rate"] = perf["within_5s_rate"]
 			status["within_10s_rate"] = perf["within_10s_rate"]
+			status["duration_within_10s_rate"] = perf["duration_within_10s_rate"]
+			status["duration_within_20s_rate"] = perf["duration_within_20s_rate"]
 			status["completion_tps"] = perf["completion_tps"]
 			status["timed_requests"] = perf["timed_requests"]
+			status["duration_timed_requests"] = perf["duration_timed_requests"]
 			status["output_requests"] = perf["output_requests"]
 		}
 		results = append(results, status)

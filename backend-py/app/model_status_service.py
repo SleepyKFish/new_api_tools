@@ -7,7 +7,7 @@ from dataclasses import dataclass, asdict, field
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
 
-from .database import get_db_manager
+from .database import DatabaseEngine, get_db_manager
 from .local_storage import get_local_storage
 from .logger import logger
 
@@ -58,8 +58,11 @@ class ModelStatus:
     current_status: str  # 'green', 'yellow', 'red'
     within_5s_rate: Optional[float] = None
     within_10s_rate: Optional[float] = None
+    duration_within_10s_rate: Optional[float] = None
+    duration_within_20s_rate: Optional[float] = None
     completion_tps: Optional[float] = None
     timed_requests: int = 0
+    duration_timed_requests: int = 0
     output_requests: int = 0
     slot_data: List[SlotStatus] = field(default_factory=list)
 
@@ -70,11 +73,14 @@ class ChannelPerformanceSummary:
     channel_id: int
     channel_name: str
     total_requests: int
-    within_5s_rate: Optional[float]
-    within_10s_rate: Optional[float]
-    completion_tps: Optional[float]
-    timed_requests: int
-    output_requests: int
+    within_5s_rate: Optional[float] = None
+    within_10s_rate: Optional[float] = None
+    duration_within_10s_rate: Optional[float] = None
+    duration_within_20s_rate: Optional[float] = None
+    completion_tps: Optional[float] = None
+    timed_requests: int = 0
+    duration_timed_requests: int = 0
+    output_requests: int = 0
 
 
 def get_status_color(success_rate: float, total_requests: int) -> str:
@@ -175,21 +181,104 @@ class ModelStatusService:
         output_requests: int,
         within_5s: int,
         within_10s: int,
+        duration_timed_requests: int,
+        duration_within_10s: int,
+        duration_within_20s: int,
         total_completion_tokens: float,
         total_use_time: float,
     ) -> Dict[str, Any]:
         """Convert raw aggregates into frontend-friendly performance metrics."""
         within_5s_rate = round(within_5s / timed_requests * 100, 2) if timed_requests > 0 else None
         within_10s_rate = round(within_10s / timed_requests * 100, 2) if timed_requests > 0 else None
+        duration_within_10s_rate = round(duration_within_10s / duration_timed_requests * 100, 2) if duration_timed_requests > 0 else None
+        duration_within_20s_rate = round(duration_within_20s / duration_timed_requests * 100, 2) if duration_timed_requests > 0 else None
         completion_tps = round(total_completion_tokens / total_use_time, 2) if total_use_time > 0 else None
         return {
             "total_requests": total_requests,
             "within_5s_rate": within_5s_rate,
             "within_10s_rate": within_10s_rate,
+            "duration_within_10s_rate": duration_within_10s_rate,
+            "duration_within_20s_rate": duration_within_20s_rate,
             "completion_tps": completion_tps,
             "timed_requests": timed_requests,
+            "duration_timed_requests": duration_timed_requests,
             "output_requests": output_requests,
         }
+
+    def _column_exists(self, table_name: str, column_name: str) -> bool:
+        """Check whether a column exists in the upstream NewAPI database."""
+        try:
+            self._db.connect()
+            if self._db.config.engine == DatabaseEngine.POSTGRESQL:
+                sql = """
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_name = :table_name
+                      AND column_name = :column_name
+                    LIMIT 1
+                """
+            else:
+                sql = """
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = DATABASE()
+                      AND table_name = :table_name
+                      AND column_name = :column_name
+                    LIMIT 1
+                """
+            return bool(self._db.execute(sql, {
+                "table_name": table_name,
+                "column_name": column_name,
+            }))
+        except Exception:
+            return False
+
+    def _first_token_time_expr(self, alias: str = "") -> str:
+        """
+        Build a SQL expression for TTFT seconds.
+
+        NewAPI records stream first response time in logs.other.frt as milliseconds.
+        Non-stream requests do not have an earlier token boundary, so their TTFT is
+        the normal returned use_time.
+        """
+        prefix = f"{alias}." if alias else ""
+        use_time = f"{prefix}use_time"
+        if not (self._column_exists("logs", "is_stream") and self._column_exists("logs", "other")):
+            return use_time
+
+        other = f"{prefix}other"
+        is_stream = f"{prefix}is_stream"
+        if self._db.config.engine == DatabaseEngine.POSTGRESQL:
+            frt_ms = f"CAST(CAST(NULLIF(NULLIF({other}, ''), 'null') AS jsonb)->>'frt' AS DOUBLE PRECISION)"
+            stream_check = f"COALESCE({is_stream}, false) = true"
+        else:
+            frt_ms = f"CAST(JSON_UNQUOTE(JSON_EXTRACT({other}, '$.frt')) AS DECIMAL(20,6))"
+            stream_check = f"COALESCE({is_stream}, 0) = 1"
+
+        if self._db.config.engine == DatabaseEngine.POSTGRESQL:
+            return f"""
+                CASE
+                    WHEN {stream_check}
+                         AND {other} IS NOT NULL
+                         AND {other} <> ''
+                         AND {other} <> 'null'
+                         AND COALESCE({frt_ms}, 0) > 0
+                    THEN {frt_ms} / 1000.0
+                    ELSE {use_time}
+                END
+            """
+
+        return f"""
+            CASE
+                WHEN {stream_check}
+                     AND {other} IS NOT NULL
+                     AND {other} <> ''
+                     AND JSON_VALID({other})
+                     AND COALESCE({frt_ms}, 0) > 0
+                THEN {frt_ms} / 1000.0
+                ELSE {use_time}
+            END
+        """
 
     def _get_model_performance_map(
         self,
@@ -202,13 +291,17 @@ class ModelStatusService:
             return {}
 
         model_placeholders = ", ".join([f":perf_model_{i}" for i in range(len(model_names))])
+        first_token_time = self._first_token_time_expr()
         sql = f"""
             SELECT
                 model_name,
                 SUM(CASE WHEN type = :type_success THEN 1 ELSE 0 END) as success_requests,
-                SUM(CASE WHEN type = :type_success AND use_time > 0 THEN 1 ELSE 0 END) as timed_requests,
-                SUM(CASE WHEN type = :type_success AND use_time > 0 AND use_time <= 5 THEN 1 ELSE 0 END) as within_5s,
-                SUM(CASE WHEN type = :type_success AND use_time > 0 AND use_time <= 10 THEN 1 ELSE 0 END) as within_10s,
+                SUM(CASE WHEN type = :type_success AND ({first_token_time}) > 0 THEN 1 ELSE 0 END) as timed_requests,
+                SUM(CASE WHEN type = :type_success AND ({first_token_time}) > 0 AND ({first_token_time}) <= 5 THEN 1 ELSE 0 END) as within_5s,
+                SUM(CASE WHEN type = :type_success AND ({first_token_time}) > 0 AND ({first_token_time}) <= 10 THEN 1 ELSE 0 END) as within_10s,
+                SUM(CASE WHEN type = :type_success AND use_time > 0 THEN 1 ELSE 0 END) as duration_timed_requests,
+                SUM(CASE WHEN type = :type_success AND use_time > 0 AND use_time <= 10 THEN 1 ELSE 0 END) as duration_within_10s,
+                SUM(CASE WHEN type = :type_success AND use_time > 0 AND use_time <= 20 THEN 1 ELSE 0 END) as duration_within_20s,
                 SUM(CASE WHEN type = :type_success AND completion_tokens > 0 AND use_time > 0 THEN 1 ELSE 0 END) as output_requests,
                 COALESCE(SUM(CASE WHEN type = :type_success AND completion_tokens > 0 AND use_time > 0 THEN completion_tokens ELSE 0 END), 0) as completion_tokens_sum,
                 COALESCE(SUM(CASE WHEN type = :type_success AND completion_tokens > 0 AND use_time > 0 THEN use_time ELSE 0 END), 0) as use_time_sum
@@ -242,6 +335,9 @@ class ModelStatusService:
                     output_requests=int(row.get("output_requests") or 0),
                     within_5s=int(row.get("within_5s") or 0),
                     within_10s=int(row.get("within_10s") or 0),
+                    duration_timed_requests=int(row.get("duration_timed_requests") or 0),
+                    duration_within_10s=int(row.get("duration_within_10s") or 0),
+                    duration_within_20s=int(row.get("duration_within_20s") or 0),
                     total_completion_tokens=float(row.get("completion_tokens_sum") or 0),
                     total_use_time=float(row.get("use_time_sum") or 0),
                 )
@@ -268,15 +364,19 @@ class ModelStatusService:
         now = int(time.time())
         total_seconds, _, _ = get_time_window_config(time_window)
         window_start = now - total_seconds
+        first_token_time = self._first_token_time_expr("l")
 
-        sql = """
+        sql = f"""
             SELECT
                 c.id as channel_id,
                 COALESCE(c.name, '') as channel_name,
                 SUM(CASE WHEN l.type = :type_success THEN 1 ELSE 0 END) as success_requests,
-                SUM(CASE WHEN l.type = :type_success AND l.use_time > 0 THEN 1 ELSE 0 END) as timed_requests,
-                SUM(CASE WHEN l.type = :type_success AND l.use_time > 0 AND l.use_time <= 5 THEN 1 ELSE 0 END) as within_5s,
-                SUM(CASE WHEN l.type = :type_success AND l.use_time > 0 AND l.use_time <= 10 THEN 1 ELSE 0 END) as within_10s,
+                SUM(CASE WHEN l.type = :type_success AND ({first_token_time}) > 0 THEN 1 ELSE 0 END) as timed_requests,
+                SUM(CASE WHEN l.type = :type_success AND ({first_token_time}) > 0 AND ({first_token_time}) <= 5 THEN 1 ELSE 0 END) as within_5s,
+                SUM(CASE WHEN l.type = :type_success AND ({first_token_time}) > 0 AND ({first_token_time}) <= 10 THEN 1 ELSE 0 END) as within_10s,
+                SUM(CASE WHEN l.type = :type_success AND l.use_time > 0 THEN 1 ELSE 0 END) as duration_timed_requests,
+                SUM(CASE WHEN l.type = :type_success AND l.use_time > 0 AND l.use_time <= 10 THEN 1 ELSE 0 END) as duration_within_10s,
+                SUM(CASE WHEN l.type = :type_success AND l.use_time > 0 AND l.use_time <= 20 THEN 1 ELSE 0 END) as duration_within_20s,
                 SUM(CASE WHEN l.type = :type_success AND l.completion_tokens > 0 AND l.use_time > 0 THEN 1 ELSE 0 END) as output_requests,
                 COALESCE(SUM(CASE WHEN l.type = :type_success AND l.completion_tokens > 0 AND l.use_time > 0 THEN l.completion_tokens ELSE 0 END), 0) as completion_tokens_sum,
                 COALESCE(SUM(CASE WHEN l.type = :type_success AND l.completion_tokens > 0 AND l.use_time > 0 THEN l.use_time ELSE 0 END), 0) as use_time_sum
@@ -306,6 +406,9 @@ class ModelStatusService:
                     output_requests=int(row.get("output_requests") or 0),
                     within_5s=int(row.get("within_5s") or 0),
                     within_10s=int(row.get("within_10s") or 0),
+                    duration_timed_requests=int(row.get("duration_timed_requests") or 0),
+                    duration_within_10s=int(row.get("duration_within_10s") or 0),
+                    duration_within_20s=int(row.get("duration_within_20s") or 0),
                     total_completion_tokens=float(row.get("completion_tokens_sum") or 0),
                     total_use_time=float(row.get("use_time_sum") or 0),
                 )
@@ -315,8 +418,11 @@ class ModelStatusService:
                     total_requests=perf["total_requests"],
                     within_5s_rate=perf["within_5s_rate"],
                     within_10s_rate=perf["within_10s_rate"],
+                    duration_within_10s_rate=perf["duration_within_10s_rate"],
+                    duration_within_20s_rate=perf["duration_within_20s_rate"],
                     completion_tps=perf["completion_tps"],
                     timed_requests=perf["timed_requests"],
+                    duration_timed_requests=perf["duration_timed_requests"],
                     output_requests=perf["output_requests"],
                 ))
         except Exception as e:
@@ -565,8 +671,11 @@ class ModelStatusService:
             current_status=current_status,
             within_5s_rate=performance.get("within_5s_rate"),
             within_10s_rate=performance.get("within_10s_rate"),
+            duration_within_10s_rate=performance.get("duration_within_10s_rate"),
+            duration_within_20s_rate=performance.get("duration_within_20s_rate"),
             completion_tps=performance.get("completion_tps"),
             timed_requests=performance.get("timed_requests", 0),
+            duration_timed_requests=performance.get("duration_timed_requests", 0),
             output_requests=performance.get("output_requests", 0),
             slot_data=slot_data,
         )
@@ -728,8 +837,11 @@ class ModelStatusService:
                 current_status=current_status,
                 within_5s_rate=performance_map.get(model_name, {}).get("within_5s_rate"),
                 within_10s_rate=performance_map.get(model_name, {}).get("within_10s_rate"),
+                duration_within_10s_rate=performance_map.get(model_name, {}).get("duration_within_10s_rate"),
+                duration_within_20s_rate=performance_map.get(model_name, {}).get("duration_within_20s_rate"),
                 completion_tps=performance_map.get(model_name, {}).get("completion_tps"),
                 timed_requests=performance_map.get(model_name, {}).get("timed_requests", 0),
+                duration_timed_requests=performance_map.get(model_name, {}).get("duration_timed_requests", 0),
                 output_requests=performance_map.get(model_name, {}).get("output_requests", 0),
                 slot_data=slot_data,
             )
@@ -779,8 +891,11 @@ class ModelStatusService:
             "current_status": status.current_status,
             "within_5s_rate": status.within_5s_rate,
             "within_10s_rate": status.within_10s_rate,
+            "duration_within_10s_rate": status.duration_within_10s_rate,
+            "duration_within_20s_rate": status.duration_within_20s_rate,
             "completion_tps": status.completion_tps,
             "timed_requests": status.timed_requests,
+            "duration_timed_requests": status.duration_timed_requests,
             "output_requests": status.output_requests,
             "slot_data": [asdict(h) for h in status.slot_data],
         }
@@ -800,8 +915,11 @@ class ModelStatusService:
             current_status=data["current_status"],
             within_5s_rate=data.get("within_5s_rate"),
             within_10s_rate=data.get("within_10s_rate"),
+            duration_within_10s_rate=data.get("duration_within_10s_rate"),
+            duration_within_20s_rate=data.get("duration_within_20s_rate"),
             completion_tps=data.get("completion_tps"),
             timed_requests=data.get("timed_requests", 0),
+            duration_timed_requests=data.get("duration_timed_requests", 0),
             output_requests=data.get("output_requests", 0),
             slot_data=slot_data,
         )

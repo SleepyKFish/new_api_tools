@@ -67,8 +67,11 @@ class ModelStatusItem(BaseModel):
     current_status: str
     within_5s_rate: Optional[float] = None
     within_10s_rate: Optional[float] = None
+    duration_within_10s_rate: Optional[float] = None
+    duration_within_20s_rate: Optional[float] = None
     completion_tps: Optional[float] = None
     timed_requests: int = 0
+    duration_timed_requests: int = 0
     output_requests: int = 0
     slot_data: List[SlotStatusItem]
 
@@ -80,8 +83,11 @@ class ChannelPerformanceItem(BaseModel):
     total_requests: int
     within_5s_rate: Optional[float] = None
     within_10s_rate: Optional[float] = None
+    duration_within_10s_rate: Optional[float] = None
+    duration_within_20s_rate: Optional[float] = None
     completion_tps: Optional[float] = None
     timed_requests: int = 0
+    duration_timed_requests: int = 0
     output_requests: int = 0
 
 
@@ -169,8 +175,11 @@ def model_status_to_item(status: ModelStatus) -> ModelStatusItem:
         current_status=status.current_status,
         within_5s_rate=status.within_5s_rate,
         within_10s_rate=status.within_10s_rate,
+        duration_within_10s_rate=status.duration_within_10s_rate,
+        duration_within_20s_rate=status.duration_within_20s_rate,
         completion_tps=status.completion_tps,
         timed_requests=status.timed_requests,
+        duration_timed_requests=status.duration_timed_requests,
         output_requests=status.output_requests,
         slot_data=[
             SlotStatusItem(
@@ -195,8 +204,11 @@ def channel_performance_to_item(summary: ChannelPerformanceSummary) -> ChannelPe
         total_requests=summary.total_requests,
         within_5s_rate=summary.within_5s_rate,
         within_10s_rate=summary.within_10s_rate,
+        duration_within_10s_rate=summary.duration_within_10s_rate,
+        duration_within_20s_rate=summary.duration_within_20s_rate,
         completion_tps=summary.completion_tps,
         timed_requests=summary.timed_requests,
+        duration_timed_requests=summary.duration_timed_requests,
         output_requests=summary.output_requests,
     )
 
