@@ -23,6 +23,8 @@ interface SlotStatus {
   end_time: number
   total_requests: number
   success_count: number
+  failure_count: number
+  empty_count: number
   success_rate: number
   status: 'green' | 'yellow' | 'red'
 }
@@ -33,6 +35,8 @@ interface ModelStatus {
   time_window: string
   total_requests: number
   success_count: number
+  failure_count: number
+  empty_count: number
   success_rate: number
   current_status: 'green' | 'yellow' | 'red'
   within_5s_rate: number | null
@@ -2406,6 +2410,14 @@ function ModelStatusCard({ model, dragHandleProps }: ModelStatusCardProps) {
     : model.current_status === 'yellow' ? 'text-yellow-600 dark:text-yellow-400'
       : 'text-red-600 dark:text-red-400'
 
+  // Failure / empty rates derived from counts (backend only returns success_rate)
+  const failureRate = model.total_requests > 0
+    ? +(model.failure_count / model.total_requests * 100).toFixed(1)
+    : 0
+  const emptyRate = model.total_requests > 0
+    ? +(model.empty_count / model.total_requests * 100).toFixed(1)
+    : 0
+
   // Card border/bg classes based on status
   const cardStatusClass = model.current_status === 'red'
     ? 'border-l-[3px] border-l-red-500 bg-red-500/[0.03]'
@@ -2444,6 +2456,10 @@ function ModelStatusCard({ model, dragHandleProps }: ModelStatusCardProps) {
           </Badge>
           <div className="ml-auto text-xs text-muted-foreground flex-shrink-0 tabular-nums">
             <span className={cn("font-semibold", rateColorClass)}>{model.success_rate}%</span>
+            <span className="mx-1 text-muted-foreground/40">·</span>
+            <span className="text-red-600 dark:text-red-400" title="失败率">失 {failureRate}%</span>
+            <span className="mx-1 text-muted-foreground/40">·</span>
+            <span className="text-amber-600 dark:text-amber-400" title="空响应率">空 {emptyRate}%</span>
             <span className="mx-1 text-muted-foreground/40">·</span>
             <span>{model.total_requests.toLocaleString()}</span>
           </div>
@@ -2526,6 +2542,22 @@ function ModelStatusCard({ model, dragHandleProps }: ModelStatusCardProps) {
                       hoveredSlot.status === 'yellow' ? 'text-yellow-600' : 'text-red-600'
                   )}>
                     {hoveredSlot.success_rate}%
+                  </span>
+                </div>
+                <div className="flex justify-between gap-4">
+                  <span>失败率:</span>
+                  <span className="font-medium text-red-600">
+                    {hoveredSlot.total_requests > 0
+                      ? +(hoveredSlot.failure_count / hoveredSlot.total_requests * 100).toFixed(1)
+                      : 0}%
+                  </span>
+                </div>
+                <div className="flex justify-between gap-4">
+                  <span>空响应率:</span>
+                  <span className="font-medium text-amber-600">
+                    {hoveredSlot.total_requests > 0
+                      ? +(hoveredSlot.empty_count / hoveredSlot.total_requests * 100).toFixed(1)
+                      : 0}%
                   </span>
                 </div>
               </div>
