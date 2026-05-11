@@ -2412,11 +2412,11 @@ function ModelStatusCard({ model, dragHandleProps }: ModelStatusCardProps) {
 
   // Failure / empty rates derived from counts (backend only returns success_rate)
   const failureRate = model.total_requests > 0
-    ? +(model.failure_count / model.total_requests * 100).toFixed(1)
-    : 0
+    ? (model.failure_count / model.total_requests * 100).toFixed(2)
+    : '0.00'
   const emptyRate = model.total_requests > 0
-    ? +(model.empty_count / model.total_requests * 100).toFixed(1)
-    : 0
+    ? (model.empty_count / model.total_requests * 100).toFixed(2)
+    : '0.00'
 
   // Card border/bg classes based on status
   const cardStatusClass = model.current_status === 'red'
@@ -2548,16 +2548,16 @@ function ModelStatusCard({ model, dragHandleProps }: ModelStatusCardProps) {
                   <span>失败率:</span>
                   <span className="font-medium text-red-600">
                     {hoveredSlot.total_requests > 0
-                      ? +(hoveredSlot.failure_count / hoveredSlot.total_requests * 100).toFixed(1)
-                      : 0}%
+                      ? (hoveredSlot.failure_count / hoveredSlot.total_requests * 100).toFixed(2)
+                      : '0.00'}%
                   </span>
                 </div>
                 <div className="flex justify-between gap-4">
                   <span>空响应率:</span>
                   <span className="font-medium text-amber-600">
                     {hoveredSlot.total_requests > 0
-                      ? +(hoveredSlot.empty_count / hoveredSlot.total_requests * 100).toFixed(1)
-                      : 0}%
+                      ? (hoveredSlot.empty_count / hoveredSlot.total_requests * 100).toFixed(2)
+                      : '0.00'}%
                   </span>
                 </div>
               </div>
