@@ -57,6 +57,7 @@ services:
       start_period: 10s
     networks:
       - default
+      - newapi-network
 
   # Redis 缓存服务
   redis:
@@ -82,6 +83,9 @@ services:
 
 networks:
   default:
+  newapi-network:
+    external: true
+    name: ${NEWAPI_NETWORK:-new-api_default}
 
 volumes:
   redis_data:
