@@ -63,6 +63,7 @@ class ModelStatus:
     duration_within_10s_rate: Optional[float] = None
     duration_within_20s_rate: Optional[float] = None
     cache_hit_rate: Optional[float] = None
+    cache_write_rate: Optional[float] = None
     completion_tps: Optional[float] = None
     timed_requests: int = 0
     duration_timed_requests: int = 0
@@ -81,6 +82,7 @@ class ChannelPerformanceSummary:
     duration_within_10s_rate: Optional[float] = None
     duration_within_20s_rate: Optional[float] = None
     cache_hit_rate: Optional[float] = None
+    cache_write_rate: Optional[float] = None
     completion_tps: Optional[float] = None
     timed_requests: int = 0
     duration_timed_requests: int = 0
@@ -189,8 +191,10 @@ class ModelStatusService:
         duration_timed_requests: int,
         duration_within_10s: int,
         duration_within_20s: int,
+        claude_requests: int,
         total_cache_denominator_tokens: float,
         total_cache_tokens: float,
+        total_cache_write_tokens: float,
         total_completion_tokens: float,
         total_use_time: float,
     ) -> Dict[str, Any]:
@@ -200,6 +204,11 @@ class ModelStatusService:
         duration_within_10s_rate = round(duration_within_10s / duration_timed_requests * 100, 2) if duration_timed_requests > 0 else None
         duration_within_20s_rate = round(duration_within_20s / duration_timed_requests * 100, 2) if duration_timed_requests > 0 else None
         cache_hit_rate = round(min(total_cache_tokens, total_cache_denominator_tokens) / total_cache_denominator_tokens * 100, 2) if total_cache_denominator_tokens > 0 else None
+        # cache_write_rate 仅在存在 Claude Messages 请求时有意义,否则保留 None 让前端展示 N/A。
+        if claude_requests > 0 and total_cache_denominator_tokens > 0:
+            cache_write_rate = round(min(total_cache_write_tokens, total_cache_denominator_tokens) / total_cache_denominator_tokens * 100, 2)
+        else:
+            cache_write_rate = None
         completion_tps = round(total_completion_tokens / total_use_time, 2) if total_use_time > 0 else None
         return {
             "total_requests": total_requests,
@@ -208,6 +217,7 @@ class ModelStatusService:
             "duration_within_10s_rate": duration_within_10s_rate,
             "duration_within_20s_rate": duration_within_20s_rate,
             "cache_hit_rate": cache_hit_rate,
+            "cache_write_rate": cache_write_rate,
             "completion_tps": completion_tps,
             "timed_requests": timed_requests,
             "duration_timed_requests": duration_timed_requests,
@@ -394,6 +404,28 @@ class ModelStatusService:
         """Build a SQL expression that extracts a boolean-ish JSON value."""
         return f"LOWER(COALESCE({self._json_text_expr(json_expr, key)}, '')) IN ('true', '1')"
 
+    def _cache_write_tokens_expr(self, other_col: str) -> str:
+        """SQL expression for 缓存写 tokens, mirroring frontend getUsageLogCacheSummary.
+
+        Priority:
+          1. other.cache_write_tokens (backend-normalized total)
+          2. cache_creation_tokens_5m + cache_creation_tokens_1h (Claude split)
+             — take max(split, cache_creation_tokens) for legacy/new compat
+          3. other.cache_creation_tokens (legacy aggregate)
+        """
+        write = self._json_number_expr(other_col, "cache_write_tokens")
+        creation = self._json_number_expr(other_col, "cache_creation_tokens")
+        creation_5m = self._json_number_expr(other_col, "cache_creation_tokens_5m")
+        creation_1h = self._json_number_expr(other_col, "cache_creation_tokens_1h")
+        return f"""
+            CASE
+                WHEN ({write}) > 0 THEN ({write})
+                WHEN (({creation_5m}) + ({creation_1h})) > 0
+                    THEN GREATEST(({creation_5m}) + ({creation_1h}), ({creation}))
+                ELSE ({creation})
+            END
+        """
+
     def _cache_tokens_sum_select(self, alias: str = "") -> str:
         """Build a cache token aggregate that is safe for older NewAPI schemas."""
         if not self._column_exists("logs", "other"):
@@ -424,9 +456,12 @@ class ModelStatusService:
 
         other_col = f"{prefix}other"
         cache_tokens = self._json_number_expr(other_col, "cache_tokens")
+        cache_write = self._cache_write_tokens_expr(other_col)
         request_path = self._request_path_expr(other_col)
         request_conversion = self._request_conversion_expr(other_col)
         is_claude = self._json_bool_expr(other_col, "claude")
+        # Claude/Anthropic 语义: prompt_tokens 不含缓存读/写,所以分母 = prompt + 缓存读 + 缓存写
+        # OpenAI-like: prompt_tokens 通常已含缓存读,沿用 MAX(prompt, cache_tokens) 近似
         return f"""
             COALESCE(SUM(CASE
                 WHEN {type_col} = :type_success
@@ -436,7 +471,7 @@ class ModelStatusService:
                          OR {request_conversion} LIKE '%->claude messages%'
                          OR {request_conversion} = 'claude messages'
                          OR ({request_conversion} = '' AND {request_path} LIKE '%/v1/messages%')
-                    THEN COALESCE({prompt_col}, 0) + COALESCE(({cache_tokens}), 0)
+                    THEN COALESCE({prompt_col}, 0) + COALESCE(({cache_tokens}), 0) + COALESCE(({cache_write}), 0)
                     ELSE GREATEST(COALESCE({prompt_col}, 0), COALESCE(({cache_tokens}), 0))
                 END
                 ELSE 0
@@ -456,6 +491,8 @@ class ModelStatusService:
             "output_requests": 0,
             "cache_denominator_sum": 0.0,
             "cache_tokens_sum": 0.0,
+            "cache_write_sum": 0.0,
+            "claude_requests": 0,
             "completion_tokens_sum": 0.0,
             "use_time_sum": 0.0,
         }
@@ -471,8 +508,10 @@ class ModelStatusService:
             duration_timed_requests=int(stats.get("duration_timed_requests") or 0),
             duration_within_10s=int(stats.get("duration_within_10s") or 0),
             duration_within_20s=int(stats.get("duration_within_20s") or 0),
+            claude_requests=int(stats.get("claude_requests") or 0),
             total_cache_denominator_tokens=float(stats.get("cache_denominator_sum") or 0),
             total_cache_tokens=float(stats.get("cache_tokens_sum") or 0),
+            total_cache_write_tokens=float(stats.get("cache_write_sum") or 0),
             total_completion_tokens=float(stats.get("completion_tokens_sum") or 0),
             total_use_time=float(stats.get("use_time_sum") or 0),
         )
@@ -612,9 +651,24 @@ class ModelStatusService:
             stats["cache_tokens_sum"] += cache_tokens
 
         if self._is_claude_messages_request(other):
-            stats["cache_denominator_sum"] += prompt_tokens + cache_tokens
+            # 与 SQL 一致: Claude 分母 = prompt + 缓存读 + 缓存写
+            cache_write = self._cache_write_tokens_from_other(other)
+            stats["cache_denominator_sum"] += prompt_tokens + cache_tokens + cache_write
+            stats["cache_write_sum"] += cache_write
+            stats["claude_requests"] += 1
         else:
             stats["cache_denominator_sum"] += max(prompt_tokens, cache_tokens)
+
+    def _cache_write_tokens_from_other(self, other: Dict[str, Any]) -> float:
+        """Mirror _cache_write_tokens_expr / frontend getUsageLogCacheSummary."""
+        write = self._safe_float(other.get("cache_write_tokens"))
+        if write > 0:
+            return write
+        split = self._safe_float(other.get("cache_creation_tokens_5m")) + self._safe_float(other.get("cache_creation_tokens_1h"))
+        creation = self._safe_float(other.get("cache_creation_tokens"))
+        if split > 0:
+            return max(split, creation)
+        return creation
 
     def _performance_log_columns(self, alias: str = "") -> List[str]:
         """Columns needed for Python-side performance aggregation."""
@@ -802,6 +856,7 @@ class ModelStatusService:
                     duration_within_10s_rate=perf["duration_within_10s_rate"],
                     duration_within_20s_rate=perf["duration_within_20s_rate"],
                     cache_hit_rate=perf["cache_hit_rate"],
+                    cache_write_rate=perf["cache_write_rate"],
                     completion_tps=perf["completion_tps"],
                     timed_requests=perf["timed_requests"],
                     duration_timed_requests=perf["duration_timed_requests"],
@@ -1056,6 +1111,7 @@ class ModelStatusService:
             duration_within_10s_rate=performance.get("duration_within_10s_rate"),
             duration_within_20s_rate=performance.get("duration_within_20s_rate"),
             cache_hit_rate=performance.get("cache_hit_rate"),
+            cache_write_rate=performance.get("cache_write_rate"),
             completion_tps=performance.get("completion_tps"),
             timed_requests=performance.get("timed_requests", 0),
             duration_timed_requests=performance.get("duration_timed_requests", 0),
@@ -1223,6 +1279,7 @@ class ModelStatusService:
                 duration_within_10s_rate=performance_map.get(model_name, {}).get("duration_within_10s_rate"),
                 duration_within_20s_rate=performance_map.get(model_name, {}).get("duration_within_20s_rate"),
                 cache_hit_rate=performance_map.get(model_name, {}).get("cache_hit_rate"),
+                cache_write_rate=performance_map.get(model_name, {}).get("cache_write_rate"),
                 completion_tps=performance_map.get(model_name, {}).get("completion_tps"),
                 timed_requests=performance_map.get(model_name, {}).get("timed_requests", 0),
                 duration_timed_requests=performance_map.get(model_name, {}).get("duration_timed_requests", 0),
@@ -1278,6 +1335,7 @@ class ModelStatusService:
             "duration_within_10s_rate": status.duration_within_10s_rate,
             "duration_within_20s_rate": status.duration_within_20s_rate,
             "cache_hit_rate": status.cache_hit_rate,
+            "cache_write_rate": status.cache_write_rate,
             "completion_tps": status.completion_tps,
             "timed_requests": status.timed_requests,
             "duration_timed_requests": status.duration_timed_requests,
@@ -1303,6 +1361,7 @@ class ModelStatusService:
             duration_within_10s_rate=data.get("duration_within_10s_rate"),
             duration_within_20s_rate=data.get("duration_within_20s_rate"),
             cache_hit_rate=data.get("cache_hit_rate"),
+            cache_write_rate=data.get("cache_write_rate"),
             completion_tps=data.get("completion_tps"),
             timed_requests=data.get("timed_requests", 0),
             duration_timed_requests=data.get("duration_timed_requests", 0),

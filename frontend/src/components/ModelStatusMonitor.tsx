@@ -44,6 +44,7 @@ interface ModelStatus {
   duration_within_10s_rate: number | null
   duration_within_20s_rate: number | null
   cache_hit_rate: number | null
+  cache_write_rate: number | null
   completion_tps: number | null
   timed_requests: number
   duration_timed_requests: number
@@ -60,6 +61,7 @@ interface ChannelPerformance {
   duration_within_10s_rate: number | null
   duration_within_20s_rate: number | null
   cache_hit_rate: number | null
+  cache_write_rate: number | null
   completion_tps: number | null
   timed_requests: number
   duration_timed_requests: number
@@ -330,6 +332,12 @@ function formatRate(value: number | null): string {
 
 function formatPreciseRate(value: number | null): string {
   return value == null ? '--' : `${value.toFixed(2)}%`
+}
+
+function formatCacheWriteRate(value: number | null | undefined): string {
+  // 仅在存在 Claude Messages 请求时后端会返回数值,
+  // null/undefined 表示该模型/渠道无 Claude 请求 → 该指标不适用。
+  return value == null ? 'N/A' : `${value.toFixed(2)}%`
 }
 
 function formatTps(value: number | null): string {
@@ -1498,12 +1506,13 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                       </div>
                     </div>
 
-                    <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-2 mt-3">
+                    <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-7 gap-2 mt-3">
                       <MetricPill label="首Token" detail="≤5s占比" value={formatRate(channel.within_5s_rate)} tone="emerald" />
                       <MetricPill label="首Token" detail="≤10s占比" value={formatRate(channel.within_10s_rate)} tone="blue" />
                       <MetricPill label="总耗时" detail="≤10s占比" value={formatRate(channel.duration_within_10s_rate)} tone="emerald" />
                       <MetricPill label="总耗时" detail="≤20s占比" value={formatRate(channel.duration_within_20s_rate)} tone="blue" />
                       <MetricPill label="缓存" detail="命中率" value={formatPreciseRate(channel.cache_hit_rate)} tone="amber" />
+                      <MetricPill label="缓存" detail="写比例" value={formatCacheWriteRate(channel.cache_write_rate)} tone="amber" />
                       <MetricPill label="输出速度" detail="tok/s" value={formatTps(channel.completion_tps)} tone="amber" />
                     </div>
                   </CardContent>
@@ -2465,12 +2474,13 @@ function ModelStatusCard({ model, dragHandleProps }: ModelStatusCardProps) {
           </div>
         </div>
 
-        <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-2 mb-3">
+        <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-7 gap-2 mb-3">
           <MetricPill label="首Token" detail="≤5s占比" value={formatRate(model.within_5s_rate)} tone="emerald" />
           <MetricPill label="首Token" detail="≤10s占比" value={formatRate(model.within_10s_rate)} tone="blue" />
           <MetricPill label="总耗时" detail="≤10s占比" value={formatRate(model.duration_within_10s_rate)} tone="emerald" />
           <MetricPill label="总耗时" detail="≤20s占比" value={formatRate(model.duration_within_20s_rate)} tone="blue" />
           <MetricPill label="缓存" detail="命中率" value={formatPreciseRate(model.cache_hit_rate)} tone="amber" />
+          <MetricPill label="缓存" detail="写比例" value={formatCacheWriteRate(model.cache_write_rate)} tone="amber" />
           <MetricPill label="输出速度" detail="tok/s" value={formatTps(model.completion_tps)} tone="amber" />
         </div>
 

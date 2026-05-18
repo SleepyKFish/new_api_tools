@@ -68,12 +68,13 @@ func roundRate(rate float64) float64 {
 	return math.Round(rate*100) / 100
 }
 
-func buildPerformanceSummary(totalRequests, timedRequests, outputRequests, within5s, within10s, durationTimedRequests, durationWithin10s, durationWithin20s int64, cacheDenominatorSum, cacheTokensSum, completionTokensSum, useTimeSum float64) map[string]interface{} {
+func buildPerformanceSummary(totalRequests, timedRequests, outputRequests, within5s, within10s, durationTimedRequests, durationWithin10s, durationWithin20s, claudeRequests int64, cacheDenominatorSum, cacheTokensSum, cacheWriteSum, completionTokensSum, useTimeSum float64) map[string]interface{} {
 	var within5sRate interface{}
 	var within10sRate interface{}
 	var durationWithin10sRate interface{}
 	var durationWithin20sRate interface{}
 	var cacheHitRate interface{}
+	var cacheWriteRate interface{}
 	var completionTPS interface{}
 
 	if timedRequests > 0 {
@@ -91,6 +92,15 @@ func buildPerformanceSummary(totalRequests, timedRequests, outputRequests, withi
 		}
 		cacheHitRate = roundRate(cacheHitTokens / cacheDenominatorSum * 100)
 	}
+	// cache_write_rate 仅在存在 Claude Messages 请求时有意义,
+	// 否则保留 nil 让前端展示 N/A。
+	if claudeRequests > 0 && cacheDenominatorSum > 0 {
+		cacheWriteTokens := cacheWriteSum
+		if cacheWriteTokens > cacheDenominatorSum {
+			cacheWriteTokens = cacheDenominatorSum
+		}
+		cacheWriteRate = roundRate(cacheWriteTokens / cacheDenominatorSum * 100)
+	}
 	if useTimeSum > 0 {
 		completionTPS = roundRate(completionTokensSum / useTimeSum)
 	}
@@ -102,6 +112,7 @@ func buildPerformanceSummary(totalRequests, timedRequests, outputRequests, withi
 		"duration_within_10s_rate": durationWithin10sRate,
 		"duration_within_20s_rate": durationWithin20sRate,
 		"cache_hit_rate":           cacheHitRate,
+		"cache_write_rate":         cacheWriteRate,
 		"completion_tps":           completionTPS,
 		"timed_requests":           timedRequests,
 		"duration_timed_requests":  durationTimedRequests,
@@ -214,6 +225,25 @@ func (s *ModelStatusService) jsonBoolExpr(jsonExpr, key string) string {
 	return fmt.Sprintf("LOWER(COALESCE(%s, '')) IN ('true', '1')", s.jsonTextExpr(jsonExpr, key))
 }
 
+// cacheWriteTokensExpr returns a SQL expression for "缓存写 tokens" with the
+// same three-level fallback the frontend uses in getUsageLogCacheSummary:
+//
+//  1. other.cache_write_tokens (后端归一化后的总量) — 优先使用
+//  2. cache_creation_tokens_5m + cache_creation_tokens_1h — 当存在拆分时取
+//     max(拆分之和, cache_creation_tokens) 以兼容旧/新两种写法
+//  3. other.cache_creation_tokens — 兜底
+func (s *ModelStatusService) cacheWriteTokensExpr(otherCol string) string {
+	write := s.jsonNumberExpr(otherCol, "cache_write_tokens")
+	creation := s.jsonNumberExpr(otherCol, "cache_creation_tokens")
+	creation5m := s.jsonNumberExpr(otherCol, "cache_creation_tokens_5m")
+	creation1h := s.jsonNumberExpr(otherCol, "cache_creation_tokens_1h")
+	return fmt.Sprintf(`CASE
+		WHEN (%s) > 0 THEN (%s)
+		WHEN ((%s) + (%s)) > 0 THEN GREATEST((%s) + (%s), (%s))
+		ELSE (%s)
+	END`, write, write, creation5m, creation1h, creation5m, creation1h, creation, creation)
+}
+
 func (s *ModelStatusService) cacheTokensSumSelect(alias string) string {
 	if !s.db.ColumnExists("logs", "other") {
 		return "0 as cache_tokens_sum"
@@ -249,9 +279,12 @@ func (s *ModelStatusService) cacheDenominatorSumSelect(alias string) string {
 
 	otherCol := prefix + "other"
 	cacheTokensExpr := s.jsonNumberExpr(otherCol, "cache_tokens")
+	cacheWriteExpr := s.cacheWriteTokensExpr(otherCol)
 	requestPathExpr := s.requestPathExpr(otherCol)
 	requestConversionExpr := s.requestConversionExpr(otherCol)
 	isClaudeExpr := s.jsonBoolExpr(otherCol, "claude")
+	// Claude/Anthropic 语义: prompt_tokens 既不含缓存读也不含缓存写,所以分母 = 非缓存输入 + 缓存读 + 缓存写
+	// OpenAI-like: prompt_tokens 通常已含缓存读,缓存写罕见,沿用 MAX(prompt, cache_tokens) 近似
 	return fmt.Sprintf(`COALESCE(SUM(CASE
 		WHEN %s = 2
 		THEN CASE
@@ -260,11 +293,11 @@ func (s *ModelStatusService) cacheDenominatorSumSelect(alias string) string {
 				OR %s LIKE '%%->claude messages%%'
 				OR %s = 'claude messages'
 				OR (%s = '' AND %s LIKE '%%/v1/messages%%')
-			THEN COALESCE(%s, 0) + COALESCE((%s), 0)
+			THEN COALESCE(%s, 0) + COALESCE((%s), 0) + COALESCE((%s), 0)
 			ELSE GREATEST(COALESCE(%s, 0), COALESCE((%s), 0))
 		END
 		ELSE 0
-	END), 0) as cache_denominator_sum`, typeCol, isClaudeExpr, requestConversionExpr, requestConversionExpr, requestConversionExpr, requestConversionExpr, requestPathExpr, promptCol, cacheTokensExpr, promptCol, cacheTokensExpr)
+	END), 0) as cache_denominator_sum`, typeCol, isClaudeExpr, requestConversionExpr, requestConversionExpr, requestConversionExpr, requestConversionExpr, requestPathExpr, promptCol, cacheTokensExpr, cacheWriteExpr, promptCol, cacheTokensExpr)
 }
 
 // ModelStatusService handles model availability monitoring
@@ -283,6 +316,8 @@ type performanceStats struct {
 	outputRequests        int64
 	cacheDenominatorSum   float64
 	cacheTokensSum        float64
+	cacheWriteSum         float64
+	claudeRequests        int64
 	completionTokensSum   float64
 	useTimeSum            float64
 }
@@ -305,8 +340,10 @@ func performanceSummaryFromStats(stats *performanceStats) map[string]interface{}
 		stats.durationTimedRequests,
 		stats.durationWithin10s,
 		stats.durationWithin20s,
+		stats.claudeRequests,
 		stats.cacheDenominatorSum,
 		stats.cacheTokensSum,
+		stats.cacheWriteSum,
 		stats.completionTokensSum,
 		stats.useTimeSum,
 	)
@@ -465,10 +502,29 @@ func accumulatePerformanceRow(stats *performanceStats, row map[string]interface{
 		stats.cacheTokensSum += cacheTokens
 	}
 	if isClaudeMessagesRequest(other) {
-		stats.cacheDenominatorSum += promptTokens + cacheTokens
+		// 与 SQL 路径保持一致: Claude 分母 = prompt + 缓存读 + 缓存写
+		cacheWriteTokens := cacheWriteTokensFromOther(other)
+		stats.cacheDenominatorSum += promptTokens + cacheTokens + cacheWriteTokens
+		stats.cacheWriteSum += cacheWriteTokens
+		stats.claudeRequests++
 	} else {
 		stats.cacheDenominatorSum += math.Max(promptTokens, cacheTokens)
 	}
+}
+
+// cacheWriteTokensFromOther mirrors cacheWriteTokensExpr / frontend
+// getUsageLogCacheSummary: prefer normalized cache_write_tokens, then the
+// 5m+1h split, then cache_creation_tokens.
+func cacheWriteTokensFromOther(other map[string]interface{}) float64 {
+	if v := toFloat64(other["cache_write_tokens"]); v > 0 {
+		return v
+	}
+	split := toFloat64(other["cache_creation_tokens_5m"]) + toFloat64(other["cache_creation_tokens_1h"])
+	creation := toFloat64(other["cache_creation_tokens"])
+	if split > 0 {
+		return math.Max(split, creation)
+	}
+	return creation
 }
 
 func (s *ModelStatusService) performanceLogColumns() string {
@@ -687,6 +743,7 @@ func (s *ModelStatusService) GetChannelPerformanceSummaries(window string) ([]ma
 			"duration_within_10s_rate": perf["duration_within_10s_rate"],
 			"duration_within_20s_rate": perf["duration_within_20s_rate"],
 			"cache_hit_rate":           perf["cache_hit_rate"],
+			"cache_write_rate":         perf["cache_write_rate"],
 			"completion_tps":           perf["completion_tps"],
 			"timed_requests":           perf["timed_requests"],
 			"duration_timed_requests":  perf["duration_timed_requests"],
@@ -863,6 +920,7 @@ func (s *ModelStatusService) GetModelStatus(modelName, window string) (map[strin
 		"duration_within_10s_rate": perf["duration_within_10s_rate"],
 		"duration_within_20s_rate": perf["duration_within_20s_rate"],
 		"cache_hit_rate":           perf["cache_hit_rate"],
+		"cache_write_rate":         perf["cache_write_rate"],
 		"completion_tps":           perf["completion_tps"],
 		"timed_requests":           perf["timed_requests"],
 		"duration_timed_requests":  perf["duration_timed_requests"],
@@ -895,6 +953,7 @@ func (s *ModelStatusService) GetMultipleModelsStatus(modelNames []string, window
 			status["duration_within_10s_rate"] = perf["duration_within_10s_rate"]
 			status["duration_within_20s_rate"] = perf["duration_within_20s_rate"]
 			status["cache_hit_rate"] = perf["cache_hit_rate"]
+			status["cache_write_rate"] = perf["cache_write_rate"]
 			status["completion_tps"] = perf["completion_tps"]
 			status["timed_requests"] = perf["timed_requests"]
 			status["duration_timed_requests"] = perf["duration_timed_requests"]
