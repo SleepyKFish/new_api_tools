@@ -593,19 +593,31 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
   // Save sort config to backend cache
   const saveSortConfigToBackend = useCallback(async (mode: SortMode, order?: string[]) => {
     try {
-      await fetch(`${apiUrl}/api/model-status/config/sort`, {
+      const response = await fetch(`${apiUrl}/api/model-status/config/sort`, {
         method: 'POST',
         headers: getAuthHeaders(),
         body: JSON.stringify({ sort_mode: mode, custom_order: order }),
       })
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`)
+      }
+      const data = await response.json()
+      if (!data.success) {
+        throw new Error(data.message || 'Save sort config failed')
+      }
       localStorage.setItem(SORT_MODE_KEY, mode)
       if (order) {
         localStorage.setItem(CUSTOM_ORDER_KEY, JSON.stringify(order))
       }
+      return true
     } catch (error) {
       console.error('Failed to save sort config:', error)
+      if (!isEmbed) {
+        showToast('error', '保存排序配置失败')
+      }
+      return false
     }
-  }, [apiUrl, getAuthHeaders])
+  }, [apiUrl, getAuthHeaders, isEmbed, showToast])
 
   // Load config from backend on mount
   const loadConfigFromBackend = useCallback(async () => {
@@ -1063,7 +1075,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
   }, [customOrder, modelStatuses])
 
   // Handle drag end for reordering
-  const handleDragEnd = (event: DragEndEvent) => {
+  const handleDragEnd = async (event: DragEndEvent) => {
     const { active, over } = event
 
     if (over && active.id !== over.id) {
@@ -1077,19 +1089,33 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
         const newOrder = mergeVisibleOrder(visibleOrder)
 
         // Update state and save
+        const previousOrder = customOrder
+        const previousSortMode = sortMode
+
         setCustomOrder(newOrder)
         setSortMode('custom')
-        saveSortConfigToBackend('custom', newOrder)
-        showToast('success', '已切换为自定义排序')
+        const saved = await saveSortConfigToBackend('custom', newOrder)
+        if (saved) {
+          showToast('success', '已切换为自定义排序')
+        } else {
+          setCustomOrder(previousOrder)
+          setSortMode(previousSortMode)
+        }
       }
     }
   }
 
   // Handle availability sort button click
   const handleAvailabilitySort = () => {
+    const previousSortMode = sortMode
     setSortMode('availability')
-    saveSortConfigToBackend('availability')
-    showToast('success', '已按成功率排序')
+    saveSortConfigToBackend('availability').then((saved) => {
+      if (saved) {
+        showToast('success', '已按成功率排序')
+      } else {
+        setSortMode(previousSortMode)
+      }
+    })
   }
 
   const toggleModelSelection = (model: string) => {
@@ -1183,16 +1209,18 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
       <Card className="overflow-visible border-0 shadow-md">
         <div className="bg-gradient-to-r from-primary/5 via-primary/3 to-transparent">
           <CardContent className="p-5">
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-              <div>
-                <div className="flex items-center gap-3">
+            <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2.5">
                   <div className="flex items-center gap-2.5">
                     <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center">
                       <Layers className="h-4.5 w-4.5 text-primary" />
                     </div>
                     <h2 className="text-xl font-semibold tracking-tight whitespace-nowrap">模型状态监控</h2>
                   </div>
-                  <Badge variant="outline" className="font-normal">{isHistory ? `${selectedDate} 历史 · 按小时` : `${getTimeWindowLabel(timeWindow)} 滑动窗口`}</Badge>
+                  <Badge variant="outline" className="font-normal shrink-0">
+                    {isHistory ? `${selectedDate} 历史 · 按小时` : `${getTimeWindowLabel(timeWindow)} 滑动窗口`}
+                  </Badge>
                 </div>
                 <p className="text-sm text-muted-foreground mt-2 flex items-center flex-wrap gap-x-3 gap-y-1">
                   <span>监控 <span className="font-semibold text-foreground">{selectedModels.length}</span> 个模型</span>
@@ -1212,7 +1240,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                   )}
                 </p>
               </div>
-            <div className="flex items-center gap-3">
+            <div className="flex flex-wrap items-center justify-end gap-2 sm:gap-3 lg:max-w-[560px]">
               {/* Date Selector (历史按日期查询, 仅非嵌入页) */}
               {!isEmbed && (
                 <div className="relative" ref={dateDropdownRef}>
@@ -1220,7 +1248,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                     variant={isHistory ? 'default' : 'outline'}
                     size="sm"
                     onClick={() => setShowDateDropdown(!showDateDropdown)}
-                    className="h-9"
+                    className="h-9 shrink-0"
                   >
                     <CalendarDays className="h-4 w-4 mr-2" />
                     {isHistory ? selectedDate : '实时'}
@@ -1276,7 +1304,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                   variant="outline"
                   size="sm"
                   onClick={() => setShowWindowDropdown(!showWindowDropdown)}
-                  className="h-9"
+                  className="h-9 shrink-0"
                 >
                   <Clock className="h-4 w-4 mr-2" />
                   {getTimeWindowLabel(timeWindow)}
@@ -1350,7 +1378,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                   variant="outline"
                   size="sm"
                   onClick={() => setShowThemeDropdown(!showThemeDropdown)}
-                  className="h-9"
+                  className="h-9 shrink-0"
                 >
                   <Palette className="h-4 w-4 mr-2" />
                   {THEMES.find(t => t.id === theme)?.name || '主题'}
@@ -1400,7 +1428,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                   variant="outline"
                   size="sm"
                   onClick={() => setShowModelSelector(!showModelSelector)}
-                  className="h-9"
+                  className="h-9 shrink-0"
                 >
                   <Settings2 className="h-4 w-4 mr-2" />
                   选择模型
@@ -2350,6 +2378,7 @@ function GroupManagerModal({ groups, allModels, onSave, onClose }: GroupManagerM
 interface ModelStatusCardProps {
   model: ModelStatus
   dragHandleProps?: React.HTMLAttributes<HTMLDivElement>
+  dragHandleRef?: (element: HTMLElement | null) => void
 }
 
 // Sortable wrapper for ModelStatusCard
@@ -2358,6 +2387,7 @@ function SortableModelCard({ model }: { model: ModelStatus }) {
     attributes,
     listeners,
     setNodeRef,
+    setActivatorNodeRef,
     transform,
     transition,
     isDragging,
@@ -2375,6 +2405,7 @@ function SortableModelCard({ model }: { model: ModelStatus }) {
       <ModelStatusCard
         model={model}
         dragHandleProps={{ ...attributes, ...listeners }}
+        dragHandleRef={setActivatorNodeRef}
       />
     </div>
   )
@@ -2745,7 +2776,7 @@ function StatusSlotBar({
   )
 }
 
-function ModelStatusCard({ model, dragHandleProps }: ModelStatusCardProps) {
+function ModelStatusCard({ model, dragHandleProps, dragHandleRef }: ModelStatusCardProps) {
 
   // Success rate color based on status
   const rateColorClass = model.current_status === 'green' ? 'text-green-600 dark:text-green-400'
@@ -2778,7 +2809,8 @@ function ModelStatusCard({ model, dragHandleProps }: ModelStatusCardProps) {
           {dragHandleProps && (
             <div
               {...dragHandleProps}
-              className="flex items-center justify-center w-5 h-5 cursor-grab active:cursor-grabbing text-muted-foreground/50 hover:text-muted-foreground transition-colors flex-shrink-0"
+              ref={dragHandleRef}
+              className="flex items-center justify-center w-7 h-7 -ml-1 cursor-grab active:cursor-grabbing touch-none rounded-md text-muted-foreground/50 hover:text-muted-foreground hover:bg-muted/70 transition-colors flex-shrink-0"
               title="拖拽排序"
             >
               <GripVertical className="h-3.5 w-3.5" />
