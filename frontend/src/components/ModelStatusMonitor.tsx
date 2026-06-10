@@ -986,6 +986,30 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
     return result
   }, [modelStatuses, sortMode, customOrder, statusFilter, groupFilter, customGroups, tokenGroups])
 
+  const mergeVisibleOrder = useCallback((visibleOrder: string[]) => {
+    const visibleSet = new Set(visibleOrder)
+    const allDisplayedModels = modelStatuses
+      .filter(m => m.total_requests > 0)
+      .map(m => m.model_name)
+    const currentFullOrder = [
+      ...customOrder.filter(name => allDisplayedModels.includes(name)),
+      ...allDisplayedModels.filter(name => !customOrder.includes(name)),
+    ]
+
+    const merged: string[] = []
+    let visibleIndex = 0
+    currentFullOrder.forEach((name) => {
+      if (visibleSet.has(name)) {
+        merged.push(visibleOrder[visibleIndex])
+        visibleIndex += 1
+      } else {
+        merged.push(name)
+      }
+    })
+
+    return merged
+  }, [customOrder, modelStatuses])
+
   // Handle drag end for reordering
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event
@@ -995,10 +1019,10 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
       const newIndex = sortedModelStatuses.findIndex(m => m.model_name === over.id)
 
       if (oldIndex !== -1 && newIndex !== -1) {
-        // Create new order
-        const newOrder = sortedModelStatuses.map(m => m.model_name)
-        const [movedItem] = newOrder.splice(oldIndex, 1)
-        newOrder.splice(newIndex, 0, movedItem)
+        const visibleOrder = sortedModelStatuses.map(m => m.model_name)
+        const [movedItem] = visibleOrder.splice(oldIndex, 1)
+        visibleOrder.splice(newIndex, 0, movedItem)
+        const newOrder = mergeVisibleOrder(visibleOrder)
 
         // Update state and save
         setCustomOrder(newOrder)
@@ -2234,10 +2258,10 @@ function SortableModelCard({ model }: { model: ModelStatus }) {
   }
 
   return (
-    <div ref={setNodeRef} style={style} {...attributes}>
+    <div ref={setNodeRef} style={style}>
       <ModelStatusCard
         model={model}
-        dragHandleProps={listeners}
+        dragHandleProps={{ ...attributes, ...listeners }}
       />
     </div>
   )

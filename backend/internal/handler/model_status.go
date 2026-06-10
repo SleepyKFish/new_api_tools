@@ -360,7 +360,8 @@ func GetSortModeConfig(c *gin.Context) {
 // PUT /config/sort-mode
 func SetSortModeConfig(c *gin.Context) {
 	var req struct {
-		SortMode string `json:"sort_mode"`
+		SortMode    string   `json:"sort_mode"`
+		CustomOrder []string `json:"custom_order"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, models.ErrorResp("INVALID_PARAMS", "Invalid request", err.Error()))
@@ -379,11 +380,16 @@ func SetSortModeConfig(c *gin.Context) {
 	}
 	svc := service.NewModelStatusService()
 	svc.SetSortMode(req.SortMode)
-	c.JSON(http.StatusOK, gin.H{
+	resp := gin.H{
 		"success":   true,
 		"sort_mode": req.SortMode,
 		"message":   "Sort mode updated",
-	})
+	}
+	if req.CustomOrder != nil {
+		svc.SetCustomOrder(req.CustomOrder)
+		resp["custom_order"] = req.CustomOrder
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 // PUT /config/custom-order
