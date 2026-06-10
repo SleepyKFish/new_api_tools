@@ -27,16 +27,6 @@ interface SlotStatus {
   empty_count: number
   success_rate: number
   status: 'green' | 'yellow' | 'red'
-  within_5s_rate?: number | null
-  within_10s_rate?: number | null
-  duration_within_10s_rate?: number | null
-  duration_within_20s_rate?: number | null
-  cache_hit_rate?: number | null
-  cache_write_rate?: number | null
-  completion_tps?: number | null
-  timed_requests?: number
-  duration_timed_requests?: number
-  output_requests?: number
 }
 
 interface ModelStatus {
@@ -93,24 +83,6 @@ const STATUS_COLORS = {
   yellow: 'bg-yellow-500',
   red: 'bg-red-500',
   empty: 'bg-gray-200 dark:bg-gray-700',  // No requests - neutral gray
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value))
-}
-
-function getSlotHue(successRate: number): number {
-  // 0% -> red, 80% -> yellow, 100% -> green.
-  const rate = clamp(successRate, 0, 100)
-  if (rate >= 80) {
-    return 55 + ((rate - 80) / 20) * 75
-  }
-  return (rate / 80) * 55
-}
-
-function getSlotTrafficIntensity(totalRequests: number, maxRequests: number): number {
-  if (totalRequests <= 0 || maxRequests <= 0) return 0
-  return clamp(Math.log1p(totalRequests) / Math.log1p(maxRequests), 0, 1)
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2681,10 +2653,6 @@ function StatusSlotBar({
   const [hoveredSlot, setHoveredSlot] = useState<SlotStatus | null>(null)
   const [tooltipPosition, setTooltipPosition] = useState({ x: 0, y: 0 })
   const [tooltipFlipped, setTooltipFlipped] = useState(false)
-  const maxSlotRequests = useMemo(
-    () => slots.reduce((max, slot) => Math.max(max, slot.total_requests), 0),
-    [slots]
-  )
 
   const handleMouseEnter = (slot: SlotStatus, event: React.MouseEvent) => {
     const rect = event.currentTarget.getBoundingClientRect()
@@ -2721,44 +2689,23 @@ function StatusSlotBar({
 
   return (
     <div className="relative">
-      <div className="flex items-end gap-[3px] h-7">
-        {slots.map((slot, index) => {
-          const intensity = getSlotTrafficIntensity(slot.total_requests, maxSlotRequests)
-          const hue = getSlotHue(slot.success_rate)
-          const height = slot.total_requests === 0 ? 8 : Math.round(10 + intensity * 18)
-          const saturation = Math.round(42 + intensity * 38)
-          const lightness = Math.round(72 - intensity * 28)
-          const opacity = slot.total_requests === 0 ? 1 : 0.34 + intensity * 0.66
-          const backgroundColor = slot.total_requests === 0
-            ? undefined
-            : `hsl(${hue} ${saturation}% ${lightness}%)`
-          const boxShadow = slot.total_requests > 0 && intensity > 0.72
-            ? `0 0 ${Math.round(5 + intensity * 7)}px hsl(${hue} ${saturation}% ${lightness}% / ${0.16 + intensity * 0.14})`
-            : undefined
-
-          return (
-            <div
-              key={index}
-              className={cn(
-                "flex-1 cursor-pointer transition-all hover:ring-1.5 hover:ring-primary hover:ring-offset-1 hover:scale-y-110",
-                index === 0 ? "rounded-l-md rounded-r-sm" :
-                  index === slots.length - 1 ? "rounded-r-md rounded-l-sm" :
-                    "rounded-sm",
-                slot.total_requests === 0 && STATUS_COLORS.empty,
-                "animate-in fade-in-0 duration-300"
-              )}
-              style={{
-                height,
-                opacity,
-                backgroundColor,
-                boxShadow,
-                animationDelay: `${index * 15}ms`,
-              }}
-              onMouseEnter={(e) => handleMouseEnter(slot, e)}
-              onMouseLeave={() => setHoveredSlot(null)}
-            />
-          )
-        })}
+      <div className="flex gap-[3px]">
+        {slots.map((slot, index) => (
+          <div
+            key={index}
+            className={cn(
+              "flex-1 h-5 cursor-pointer transition-all hover:ring-1.5 hover:ring-primary hover:ring-offset-1 hover:scale-y-110",
+              index === 0 ? "rounded-l-md rounded-r-sm" :
+                index === slots.length - 1 ? "rounded-r-md rounded-l-sm" :
+                  "rounded-sm",
+              slot.total_requests === 0 ? STATUS_COLORS.empty : STATUS_COLORS[slot.status],
+              "animate-in fade-in-0 duration-300"
+            )}
+            style={{ animationDelay: `${index * 15}ms` }}
+            onMouseEnter={(e) => handleMouseEnter(slot, e)}
+            onMouseLeave={() => setHoveredSlot(null)}
+          />
+        ))}
       </div>
 
       <div className="flex justify-between mt-1.5 text-[10px] text-muted-foreground/60">
@@ -2821,35 +2768,6 @@ function StatusSlotBar({
                   ? (hoveredSlot.empty_count / hoveredSlot.total_requests * 100).toFixed(2)
                   : '0.00'}%
               </span>
-            </div>
-            <div className="my-1 border-t" />
-            <div className="flex justify-between gap-4">
-              <span>首Token ≤5s:</span>
-              <span className="font-medium text-foreground">{formatRate(hoveredSlot.within_5s_rate ?? null)}</span>
-            </div>
-            <div className="flex justify-between gap-4">
-              <span>首Token ≤10s:</span>
-              <span className="font-medium text-foreground">{formatRate(hoveredSlot.within_10s_rate ?? null)}</span>
-            </div>
-            <div className="flex justify-between gap-4">
-              <span>总耗时 ≤10s:</span>
-              <span className="font-medium text-foreground">{formatRate(hoveredSlot.duration_within_10s_rate ?? null)}</span>
-            </div>
-            <div className="flex justify-between gap-4">
-              <span>总耗时 ≤20s:</span>
-              <span className="font-medium text-foreground">{formatRate(hoveredSlot.duration_within_20s_rate ?? null)}</span>
-            </div>
-            <div className="flex justify-between gap-4">
-              <span>缓存命中:</span>
-              <span className="font-medium text-foreground">{formatPreciseRate(hoveredSlot.cache_hit_rate ?? null)}</span>
-            </div>
-            <div className="flex justify-between gap-4">
-              <span>缓存写入:</span>
-              <span className="font-medium text-foreground">{formatCacheWriteRate(hoveredSlot.cache_write_rate)}</span>
-            </div>
-            <div className="flex justify-between gap-4">
-              <span>输出速度:</span>
-              <span className="font-medium text-foreground">{formatTps(hoveredSlot.completion_tps ?? null)}</span>
             </div>
           </div>
         </div>
