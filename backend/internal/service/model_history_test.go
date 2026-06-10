@@ -76,6 +76,12 @@ func TestModelHistoryRoundTrip(t *testing.T) {
 				useTimeSum:          300,
 			},
 		},
+		chanSlot: map[int64]map[int]*slotCounts{
+			7: {
+				0:  {total: 4, success: 3, failure: 1, empty: 0},
+				13: {total: 5, success: 4, failure: 0, empty: 1},
+			},
+		},
 		chanName: map[int64]string{7: "primary"},
 	}
 
@@ -155,6 +161,16 @@ func TestModelHistoryRoundTrip(t *testing.T) {
 	}
 	if chans[0]["success_rate"].(float64) != 77.78 {
 		t.Fatalf("channel success_rate wrong: %v", chans[0]["success_rate"])
+	}
+	channelSlotData, ok := chans[0]["slot_data"].([]map[string]interface{})
+	if !ok || len(channelSlotData) != historySlotCount {
+		t.Fatalf("channel slot_data len wrong: %d", len(channelSlotData))
+	}
+	if channelSlotData[0]["total_requests"].(int64) != 4 || channelSlotData[0]["success_count"].(int64) != 3 || channelSlotData[0]["failure_count"].(int64) != 1 {
+		t.Fatalf("channel slot0 wrong: %v", channelSlotData[0])
+	}
+	if channelSlotData[13]["total_requests"].(int64) != 5 || channelSlotData[13]["empty_count"].(int64) != 1 {
+		t.Fatalf("channel slot13 wrong: %v", channelSlotData[13])
 	}
 
 	// Idempotent re-save: same date should replace, not duplicate.

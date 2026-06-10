@@ -1406,6 +1406,7 @@ func (s *ModelStatusService) AggregateDay(date string) error {
 		models:   make(map[string]*dailyPerfStats),
 		slots:    make(map[string]map[int]*slotCounts),
 		channels: make(map[int64]*dailyPerfStats),
+		chanSlot: make(map[int64]map[int]*slotCounts),
 		chanName: make(map[int64]string),
 	}
 
@@ -1457,16 +1458,16 @@ func (s *ModelStatusService) accumulateDayRow(snap *daySnapshot, row map[string]
 	createdAt := toInt64(row["created_at"])
 	completion := toFloat64(row["completion_tokens"])
 	channelID := toInt64(row["channel_id"])
+	slotIdx := int((createdAt - startTime) / historySlotSeconds)
+	if slotIdx < 0 {
+		slotIdx = 0
+	}
+	if slotIdx >= historySlotCount {
+		slotIdx = historySlotCount - 1
+	}
 
 	// --- Availability slot counts (hourly) for the model ---
 	if modelName != "" {
-		slotIdx := int((createdAt - startTime) / historySlotSeconds)
-		if slotIdx < 0 {
-			slotIdx = 0
-		}
-		if slotIdx >= historySlotCount {
-			slotIdx = historySlotCount - 1
-		}
 		modelSlots := snap.slots[modelName]
 		if modelSlots == nil {
 			modelSlots = make(map[int]*slotCounts)
@@ -1504,14 +1505,28 @@ func (s *ModelStatusService) accumulateDayRow(snap *daySnapshot, row map[string]
 		chStat = &dailyPerfStats{}
 		snap.channels[channelID] = chStat
 	}
+	channelSlots := snap.chanSlot[channelID]
+	if channelSlots == nil {
+		channelSlots = make(map[int]*slotCounts)
+		snap.chanSlot[channelID] = channelSlots
+	}
+	chSlot := channelSlots[slotIdx]
+	if chSlot == nil {
+		chSlot = &slotCounts{}
+		channelSlots[slotIdx] = chSlot
+	}
+	chSlot.total++
 	chStat.totalRequests++
 	switch {
 	case logType == 2 && completion > 0:
 		chStat.successCount++
+		chSlot.success++
 	case logType == 5:
 		chStat.failureCount++
+		chSlot.failure++
 	case logType == 2 && completion == 0:
 		chStat.emptyCount++
+		chSlot.empty++
 	}
 
 	// --- Performance accumulators (type=2 only, mirrors live path) ---

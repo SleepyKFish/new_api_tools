@@ -153,9 +153,20 @@ func (s *ModelHistoryService) ensureSchema() error {
 			use_time_sum REAL NOT NULL DEFAULT 0,
 			PRIMARY KEY (date, channel_id)
 		)`,
+		`CREATE TABLE IF NOT EXISTS channel_hourly_slot (
+			date TEXT NOT NULL,
+			channel_id INTEGER NOT NULL,
+			slot_idx INTEGER NOT NULL,
+			total_requests INTEGER NOT NULL DEFAULT 0,
+			success_count INTEGER NOT NULL DEFAULT 0,
+			failure_count INTEGER NOT NULL DEFAULT 0,
+			empty_count INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (date, channel_id, slot_idx)
+		)`,
 		`CREATE INDEX IF NOT EXISTS idx_daily_summary_date ON model_daily_summary(date)`,
 		`CREATE INDEX IF NOT EXISTS idx_hourly_slot_date_model ON model_hourly_slot(date, model_name)`,
 		`CREATE INDEX IF NOT EXISTS idx_daily_channel_date ON model_daily_channel(date)`,
+		`CREATE INDEX IF NOT EXISTS idx_channel_hourly_slot_date_channel ON channel_hourly_slot(date, channel_id)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -248,6 +259,7 @@ type daySnapshot struct {
 	models   map[string]*dailyPerfStats
 	slots    map[string]map[int]*slotCounts // model -> slotIdx -> counts
 	channels map[int64]*dailyPerfStats
+	chanSlot map[int64]map[int]*slotCounts // channel -> slotIdx -> counts
 	chanName map[int64]string
 }
 
@@ -267,7 +279,7 @@ func (s *ModelHistoryService) SaveDay(snap *daySnapshot) error {
 	}
 	defer tx.Rollback()
 
-	for _, table := range []string{"model_daily_summary", "model_hourly_slot", "model_daily_channel"} {
+	for _, table := range []string{"model_daily_summary", "model_hourly_slot", "model_daily_channel", "channel_hourly_slot"} {
 		if _, err := tx.Exec(fmt.Sprintf("DELETE FROM %s WHERE date = ?", table), snap.date); err != nil {
 			return err
 		}
@@ -331,6 +343,21 @@ func (s *ModelHistoryService) SaveDay(snap *daySnapshot) error {
 			st.completionTokensSum, st.useTimeSum,
 		); err != nil {
 			return err
+		}
+	}
+
+	chanSlotStmt, err := tx.Prepare(`INSERT INTO channel_hourly_slot (
+		date, channel_id, slot_idx, total_requests, success_count, failure_count, empty_count
+	) VALUES (?,?,?,?,?,?,?)`)
+	if err != nil {
+		return err
+	}
+	defer chanSlotStmt.Close()
+	for channelID, slots := range snap.chanSlot {
+		for idx, c := range slots {
+			if _, err := chanSlotStmt.Exec(snap.date, channelID, idx, c.total, c.success, c.failure, c.empty); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -585,10 +612,33 @@ func (s *ModelHistoryService) GetChannelPerformanceByDate(date string) ([]map[st
 			"timed_requests":           perf["timed_requests"],
 			"duration_timed_requests":  perf["duration_timed_requests"],
 			"output_requests":          perf["output_requests"],
-			"slot_data":                buildAvailabilitySlotData(map[int]*slotCounts{}, dayStartTimestamp(date), historySlotSeconds, historySlotCount),
+			"slot_data":                buildAvailabilitySlotData(s.getChannelSlots(date, item.id), dayStartTimestamp(date), historySlotSeconds, historySlotCount),
 		})
 	}
 	return results, nil
+}
+
+func (s *ModelHistoryService) getChannelSlots(date string, channelID int64) map[int]*slotCounts {
+	rows, err := s.db.Query(`SELECT slot_idx, total_requests, success_count, failure_count, empty_count
+		FROM channel_hourly_slot WHERE date = ? AND channel_id = ?`, date, channelID)
+	if err != nil {
+		return map[int]*slotCounts{}
+	}
+	defer rows.Close()
+
+	out := make(map[int]*slotCounts)
+	for rows.Next() {
+		var idx int
+		c := &slotCounts{}
+		if err := rows.Scan(&idx, &c.total, &c.success, &c.failure, &c.empty); err != nil {
+			return map[int]*slotCounts{}
+		}
+		out[idx] = c
+	}
+	if err := rows.Err(); err != nil {
+		return map[int]*slotCounts{}
+	}
+	return out
 }
 
 // dayStartTimestamp returns the unix timestamp of local midnight for a
