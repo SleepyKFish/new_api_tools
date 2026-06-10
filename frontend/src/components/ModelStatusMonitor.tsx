@@ -1693,44 +1693,33 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
               {activeChannelSummaries.map((channel) => (
                 <Card key={channel.channel_id} className="border border-border/60 shadow-none">
                   <CardContent className="p-3.5">
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2 min-w-0">
-                          <div className="text-sm font-medium truncate" title={channel.channel_name}>
-                            {channel.channel_name}
-                          </div>
-                          <Badge
-                            variant={channel.current_status === 'green' ? 'success' : channel.current_status === 'yellow' ? 'warning' : 'destructive'}
-                            className="text-[10px] px-1.5 py-0 h-5 flex-shrink-0"
-                          >
-                            {STATUS_LABELS[channel.current_status]}
-                          </Badge>
-                        </div>
-                        <div className="text-[11px] text-muted-foreground mt-1">
-                          渠道 #{channel.channel_id} · 请求 {channel.total_requests.toLocaleString()}
-                        </div>
+                    <div className="flex items-center gap-2">
+                      <div className="text-sm font-medium truncate" title={channel.channel_name}>
+                        {channel.channel_name}
                       </div>
-                      <div className="text-right text-[11px] text-muted-foreground flex-shrink-0">
-                        <div>
-                          成功率 <span className={cn(
-                            "font-semibold tabular-nums",
-                            channel.current_status === 'green' ? 'text-green-600 dark:text-green-400' :
-                              channel.current_status === 'yellow' ? 'text-yellow-600 dark:text-yellow-400' :
-                                'text-red-600 dark:text-red-400'
-                          )}>{channel.success_rate}%</span>
-                        </div>
-                        <div>
-                          失败 <span className="font-medium text-red-600 tabular-nums">
-                            {channel.total_requests > 0 ? (channel.failure_count / channel.total_requests * 100).toFixed(2) : '0.00'}%
-                          </span>
-                          <span className="mx-1 text-muted-foreground/40">·</span>
-                          空 <span className="font-medium text-amber-600 tabular-nums">
-                            {channel.total_requests > 0 ? (channel.empty_count / channel.total_requests * 100).toFixed(2) : '0.00'}%
-                          </span>
-                        </div>
-                        <div>首Token计时 {channel.timed_requests.toLocaleString()}</div>
-                        <div>总耗时计时 {channel.duration_timed_requests.toLocaleString()}</div>
-                        <div>输出样本 {channel.output_requests.toLocaleString()}</div>
+                      <Badge
+                        variant={channel.current_status === 'green' ? 'success' : channel.current_status === 'yellow' ? 'warning' : 'destructive'}
+                        className="text-[10px] px-1.5 py-0 h-5 flex-shrink-0"
+                      >
+                        {STATUS_LABELS[channel.current_status]}
+                      </Badge>
+                      <div className="ml-auto text-xs text-muted-foreground flex-shrink-0 tabular-nums">
+                        <span className={cn(
+                          "font-semibold",
+                          channel.current_status === 'green' ? 'text-green-600 dark:text-green-400' :
+                            channel.current_status === 'yellow' ? 'text-yellow-600 dark:text-yellow-400' :
+                              'text-red-600 dark:text-red-400'
+                        )}>{channel.success_rate}%</span>
+                        <span className="mx-1 text-muted-foreground/40">·</span>
+                        <span className="text-red-600 dark:text-red-400" title="失败率">
+                          失 {channel.total_requests > 0 ? (channel.failure_count / channel.total_requests * 100).toFixed(2) : '0.00'}%
+                        </span>
+                        <span className="mx-1 text-muted-foreground/40">·</span>
+                        <span className="text-amber-600 dark:text-amber-400" title="空响应率">
+                          空 {channel.total_requests > 0 ? (channel.empty_count / channel.total_requests * 100).toFixed(2) : '0.00'}%
+                        </span>
+                        <span className="mx-1 text-muted-foreground/40">·</span>
+                        <span title={`渠道 #${channel.channel_id}`}>{channel.total_requests.toLocaleString()}</span>
                       </div>
                     </div>
 
