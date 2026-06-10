@@ -158,3 +158,39 @@ func TestModelHistoryRoundTrip(t *testing.T) {
 		t.Fatalf("re-save duplicated dates: %v", dates2)
 	}
 }
+
+func TestParseCustomTimeWindow(t *testing.T) {
+	tests := []struct {
+		name       string
+		window     string
+		wantOK     bool
+		wantTotal  int64
+		normalized string
+	}{
+		{name: "preset", window: "15m", wantOK: true, wantTotal: 900, normalized: "15m"},
+		{name: "minutes", window: "45min", wantOK: true, wantTotal: 2700, normalized: "45min"},
+		{name: "legacy minute suffix", window: "45m", wantOK: true, wantTotal: 2700, normalized: "45min"},
+		{name: "hours", window: "2h", wantOK: true, wantTotal: 7200, normalized: "2h"},
+		{name: "seconds unsupported", window: "30s", wantOK: false},
+		{name: "days unsupported", window: "1d", wantOK: false},
+		{name: "zero unsupported", window: "0min", wantOK: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, ok := ParseTimeWindow(tt.window)
+			if ok != tt.wantOK {
+				t.Fatalf("ParseTimeWindow(%q) ok=%v, want %v", tt.window, ok, tt.wantOK)
+			}
+			if !tt.wantOK {
+				return
+			}
+			if cfg.totalSeconds != tt.wantTotal {
+				t.Fatalf("totalSeconds=%d, want %d", cfg.totalSeconds, tt.wantTotal)
+			}
+			if got := NormalizeTimeWindow(tt.window); got != tt.normalized {
+				t.Fatalf("NormalizeTimeWindow(%q)=%q, want %q", tt.window, got, tt.normalized)
+			}
+		})
+	}
+}

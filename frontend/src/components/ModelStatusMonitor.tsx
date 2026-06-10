@@ -283,6 +283,24 @@ const TIME_WINDOWS = [
   { value: '24h', label: '24小时', slots: 24 },
 ]
 
+type CustomWindowUnit = 'min' | 'h'
+
+function getTimeWindowLabel(value: string): string {
+  const preset = TIME_WINDOWS.find(w => w.value === value)
+  if (preset) return preset.label
+
+  const match = value.match(/^(\d+)(min|m|h)$/)
+  if (!match) return '24小时'
+
+  return match[2] === 'h' ? `${match[1]}小时` : `${match[1]}分钟`
+}
+
+function parseTimeWindowForCustomInput(value: string): { amount: string; unit: CustomWindowUnit } {
+  const match = value.match(/^(\d+)(min|m|h)$/)
+  if (!match) return { amount: '45', unit: 'min' }
+  return { amount: match[1], unit: match[2] === 'h' ? 'h' : 'min' }
+}
+
 // Theme options
 const THEMES = [
   { id: 'daylight', name: '日光', nameEn: 'Daylight', icon: Sun, description: '明亮清新的浅色', preview: 'bg-slate-100' },
@@ -389,6 +407,8 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
     const saved = localStorage.getItem(TIME_WINDOW_KEY)
     return saved || '24h'
   })
+  const [customWindowAmount, setCustomWindowAmount] = useState(() => parseTimeWindowForCustomInput(localStorage.getItem(TIME_WINDOW_KEY) || '45min').amount)
+  const [customWindowUnit, setCustomWindowUnit] = useState<CustomWindowUnit>(() => parseTimeWindowForCustomInput(localStorage.getItem(TIME_WINDOW_KEY) || '45min').unit)
 
   const [theme, setTheme] = useState(() => {
     const saved = localStorage.getItem(THEME_KEY)
@@ -498,6 +518,29 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
     }
   }, [apiUrl, getAuthHeaders])
 
+  const applyTimeWindow = useCallback((window: string) => {
+    setTimeWindow(window)
+    saveTimeWindowToBackend(window)
+    const customInput = parseTimeWindowForCustomInput(window)
+    setCustomWindowAmount(customInput.amount)
+    setCustomWindowUnit(customInput.unit)
+    setShowWindowDropdown(false)
+  }, [saveTimeWindowToBackend])
+
+  const applyCustomTimeWindow = useCallback(() => {
+    const amount = parseInt(customWindowAmount, 10)
+    if (!Number.isFinite(amount) || amount <= 0) {
+      showToast('error', '请输入大于 0 的时间窗口')
+      return
+    }
+    const maxAmount = customWindowUnit === 'h' ? 168 : 10080
+    if (amount > maxAmount) {
+      showToast('error', '自定义时间窗口最大支持 7 天')
+      return
+    }
+    applyTimeWindow(`${amount}${customWindowUnit}`)
+  }, [applyTimeWindow, customWindowAmount, customWindowUnit, showToast])
+
   // Save theme to backend cache
   const saveThemeToBackend = useCallback(async (newTheme: string) => {
     try {
@@ -572,6 +615,9 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
         }
         if (data.time_window) {
           setTimeWindow(data.time_window)
+          const customInput = parseTimeWindowForCustomInput(data.time_window)
+          setCustomWindowAmount(customInput.amount)
+          setCustomWindowUnit(customInput.unit)
           localStorage.setItem(TIME_WINDOW_KEY, data.time_window)
         }
         if (data.theme) {
@@ -1140,7 +1186,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                     </div>
                     <h2 className="text-xl font-semibold tracking-tight whitespace-nowrap">模型状态监控</h2>
                   </div>
-                  <Badge variant="outline" className="font-normal">{isHistory ? `${selectedDate} 历史 · 按小时` : `${TIME_WINDOWS.find(w => w.value === timeWindow)?.label || '24小时'} 滑动窗口`}</Badge>
+                  <Badge variant="outline" className="font-normal">{isHistory ? `${selectedDate} 历史 · 按小时` : `${getTimeWindowLabel(timeWindow)} 滑动窗口`}</Badge>
                 </div>
                 <p className="text-sm text-muted-foreground mt-2 flex items-center flex-wrap gap-x-3 gap-y-1">
                   <span>监控 <span className="font-semibold text-foreground">{selectedModels.length}</span> 个模型</span>
@@ -1227,12 +1273,12 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                   className="h-9"
                 >
                   <Clock className="h-4 w-4 mr-2" />
-                  {TIME_WINDOWS.find(w => w.value === timeWindow)?.label}
+                  {getTimeWindowLabel(timeWindow)}
                   <ChevronDown className="h-3 w-3 ml-1" />
                 </Button>
 
                 {showWindowDropdown && (
-                  <div className="absolute right-0 mt-1 w-36 bg-popover border rounded-md shadow-lg z-40">
+                  <div className="absolute right-0 mt-1 w-56 bg-popover border rounded-md shadow-lg z-40">
                     <div className="p-2 border-b">
                       <p className="text-xs text-muted-foreground">时间窗口</p>
                     </div>
@@ -1240,11 +1286,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                       {TIME_WINDOWS.map(({ value, label }) => (
                         <button
                           key={value}
-                          onClick={() => {
-                            setTimeWindow(value)
-                            saveTimeWindowToBackend(value)
-                            setShowWindowDropdown(false)
-                          }}
+                          onClick={() => applyTimeWindow(value)}
                           className={cn(
                             "w-full text-left px-3 py-2 text-sm rounded hover:bg-accent transition-colors",
                             timeWindow === value && "bg-accent text-accent-foreground"
@@ -1253,6 +1295,43 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                           {label}
                         </button>
                       ))}
+                    </div>
+                    <div className="border-t p-2">
+                      <p className="text-xs text-muted-foreground mb-2">自定义</p>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="number"
+                          min="1"
+                          max={customWindowUnit === 'h' ? 168 : 10080}
+                          value={customWindowAmount}
+                          onChange={(e) => setCustomWindowAmount(e.target.value.replace(/[^\d]/g, ''))}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') applyCustomTimeWindow()
+                          }}
+                          className="h-8 min-w-0 flex-1 px-2 text-sm bg-muted/50 border rounded-md focus:outline-none focus:ring-1 focus:ring-primary"
+                        />
+                        <div className="inline-flex h-8 rounded-md border overflow-hidden flex-shrink-0">
+                          {[
+                            { value: 'min' as CustomWindowUnit, label: '分钟' },
+                            { value: 'h' as CustomWindowUnit, label: '小时' },
+                          ].map(({ value, label }) => (
+                            <button
+                              key={value}
+                              type="button"
+                              onClick={() => setCustomWindowUnit(value)}
+                              className={cn(
+                                "px-2 text-xs transition-colors",
+                                customWindowUnit === value ? "bg-primary text-primary-foreground" : "hover:bg-accent"
+                              )}
+                            >
+                              {label}
+                            </button>
+                          ))}
+                        </div>
+                        <Button size="sm" className="h-8 px-2 flex-shrink-0" onClick={applyCustomTimeWindow}>
+                          应用
+                        </Button>
+                      </div>
                     </div>
                   </div>
                 )}

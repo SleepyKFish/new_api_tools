@@ -240,23 +240,16 @@ func SetTimeWindowConfig(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, models.ErrorResp("INVALID_PARAMS", "Invalid request", err.Error()))
 		return
 	}
-	// Validate
-	valid := false
-	for _, w := range service.AvailableTimeWindows {
-		if w == req.TimeWindow {
-			valid = true
-			break
-		}
-	}
-	if !valid {
-		c.JSON(http.StatusBadRequest, models.ErrorResp("INVALID_PARAMS", "Invalid time window", ""))
+	if !service.IsValidTimeWindow(req.TimeWindow) {
+		c.JSON(http.StatusBadRequest, models.ErrorResp("INVALID_PARAMS", "Invalid time window (use presets, Nmin, or Nh)", ""))
 		return
 	}
+	timeWindow := service.NormalizeTimeWindow(req.TimeWindow)
 	svc := service.NewModelStatusService()
-	svc.SetTimeWindow(req.TimeWindow)
+	svc.SetTimeWindow(timeWindow)
 	c.JSON(http.StatusOK, gin.H{
 		"success":     true,
-		"time_window": req.TimeWindow,
+		"time_window": timeWindow,
 		"message":     "Time window updated",
 	})
 }

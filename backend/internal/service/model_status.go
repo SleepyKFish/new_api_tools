@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -35,7 +37,6 @@ var (
 )
 
 // Time window slot configurations: {totalSeconds, numSlots, slotSeconds}
-// Must match Python backend and frontend TIME_WINDOWS exactly
 type timeWindowConfig struct {
 	totalSeconds int64
 	numSlots     int
@@ -49,6 +50,79 @@ var timeWindowConfigs = map[string]timeWindowConfig{
 	"6h":  {21600, 24, 900},  // 6 hours, 24 slots, 15 minutes each
 	"12h": {43200, 24, 1800}, // 12 hours, 24 slots, 30 minutes each
 	"24h": {86400, 24, 3600}, // 24 hours, 24 slots, 1 hour each
+}
+
+var customTimeWindowPattern = regexp.MustCompile(`^([1-9]\d*)(min|m|h)$`)
+
+func ParseTimeWindow(window string) (timeWindowConfig, bool) {
+	if cfg, ok := timeWindowConfigs[window]; ok {
+		return cfg, true
+	}
+
+	matches := customTimeWindowPattern.FindStringSubmatch(strings.ToLower(strings.TrimSpace(window)))
+	if matches == nil {
+		return timeWindowConfig{}, false
+	}
+	value, err := strconv.Atoi(matches[1])
+	if err != nil {
+		return timeWindowConfig{}, false
+	}
+
+	var totalSeconds int64
+	switch matches[2] {
+	case "min", "m":
+		totalSeconds = int64(value) * 60
+	case "h":
+		totalSeconds = int64(value) * 3600
+	default:
+		return timeWindowConfig{}, false
+	}
+	if totalSeconds < 60 || totalSeconds > 7*24*3600 {
+		return timeWindowConfig{}, false
+	}
+
+	return timeWindowConfig{
+		totalSeconds: totalSeconds,
+		numSlots:     chooseTimeWindowSlotCount(totalSeconds),
+		slotSeconds:  chooseTimeWindowSlotSeconds(totalSeconds),
+	}, true
+}
+
+func IsValidTimeWindow(window string) bool {
+	_, ok := ParseTimeWindow(window)
+	return ok
+}
+
+func NormalizeTimeWindow(window string) string {
+	window = strings.ToLower(strings.TrimSpace(window))
+	if _, ok := timeWindowConfigs[window]; ok {
+		return window
+	}
+	if strings.HasSuffix(window, "m") && !strings.HasSuffix(window, "min") {
+		return strings.TrimSuffix(window, "m") + "min"
+	}
+	return window
+}
+
+func chooseTimeWindowSlotCount(totalSeconds int64) int {
+	switch {
+	case totalSeconds <= 3600:
+		return int(totalSeconds / 60)
+	default:
+		return 24
+	}
+}
+
+func chooseTimeWindowSlotSeconds(totalSeconds int64) int64 {
+	slots := chooseTimeWindowSlotCount(totalSeconds)
+	if slots <= 0 {
+		return 60
+	}
+	slotSeconds := totalSeconds / int64(slots)
+	if slotSeconds < 60 {
+		return 60
+	}
+	return slotSeconds
 }
 
 // getStatusColor determines status color based on success rate (matches Python backend)
@@ -669,7 +743,7 @@ func (s *ModelStatusService) GetChannelPerformanceSummaries(window string) ([]ma
 		return cached, nil
 	}
 
-	twConfig, ok := timeWindowConfigs[window]
+	twConfig, ok := ParseTimeWindow(window)
 	if !ok {
 		twConfig = timeWindowConfigs["24h"]
 	}
@@ -795,7 +869,7 @@ func (s *ModelStatusService) GetModelStatus(modelName, window string) (map[strin
 	}
 
 	// Get window configuration (dynamic slot count per window)
-	twConfig, ok := timeWindowConfigs[window]
+	twConfig, ok := ParseTimeWindow(window)
 	if !ok {
 		twConfig = timeWindowConfigs["24h"]
 	}
@@ -936,7 +1010,7 @@ func (s *ModelStatusService) GetModelStatus(modelName, window string) (map[strin
 // GetMultipleModelsStatus returns status for multiple models
 func (s *ModelStatusService) GetMultipleModelsStatus(modelNames []string, window string) ([]map[string]interface{}, error) {
 	results := make([]map[string]interface{}, 0, len(modelNames))
-	twConfig, ok := timeWindowConfigs[window]
+	twConfig, ok := ParseTimeWindow(window)
 	if !ok {
 		twConfig = timeWindowConfigs["24h"]
 	}
@@ -1125,7 +1199,7 @@ func (s *ModelStatusService) GetConfig() map[string]interface{} {
 // SetTimeWindow saves time window to cache
 func (s *ModelStatusService) SetTimeWindow(window string) {
 	cm := cache.Get()
-	cm.Set("model_status:time_window", window, 0)
+	cm.Set("model_status:time_window", NormalizeTimeWindow(window), 0)
 }
 
 // SetTheme saves theme to cache
