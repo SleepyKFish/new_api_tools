@@ -1690,10 +1690,17 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
             </div>
 
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
-              {activeChannelSummaries.map((channel) => (
-                <Card key={channel.channel_id} className="border border-border/60 shadow-none">
-                  <CardContent className="p-3.5">
-                    <div className="flex items-center gap-2">
+              {activeChannelSummaries.map((channel) => {
+                const cardStatusClass = channel.current_status === 'red'
+                  ? 'border-l-[3px] border-l-red-500 bg-red-500/[0.03]'
+                  : channel.current_status === 'yellow'
+                    ? 'border-l-[3px] border-l-yellow-500 bg-yellow-500/[0.03]'
+                    : ''
+
+                return (
+                  <Card key={channel.channel_id} className={cn("border border-border/60 shadow-none", cardStatusClass)}>
+                    <CardContent className="p-3.5">
+                      <div className="flex items-center gap-2">
                       <div className="text-sm font-medium truncate" title={channel.channel_name}>
                         {channel.channel_name}
                       </div>
@@ -1740,7 +1747,8 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                     )}
                   </CardContent>
                 </Card>
-              ))}
+                )
+              })}
             </div>
           </CardContent>
         </Card>
