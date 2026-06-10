@@ -638,6 +638,9 @@ func (s *availabilityStats) accumulate(row map[string]interface{}, startTime int
 		s.emptyCount++
 		counts.empty++
 	}
+	if logType == 2 {
+		accumulateSlotPerformance(counts, row)
+	}
 }
 
 func buildAvailabilitySlotData(slots map[int]*slotCounts, startTime int64, slotSeconds int64, numSlots int) []map[string]interface{} {
@@ -649,23 +652,51 @@ func buildAvailabilitySlotData(slots map[int]*slotCounts, startTime int64, slotS
 		var total, success, failure, empty int64
 		if c != nil {
 			total, success, failure, empty = c.total, c.success, c.failure, c.empty
+		} else {
+			c = &slotCounts{}
 		}
 
 		slotRate := float64(100)
 		if total > 0 {
 			slotRate = float64(success) / float64(total) * 100
 		}
+		perf := buildPerformanceSummary(
+			success,
+			c.timedRequests,
+			c.outputRequests,
+			c.within5s,
+			c.within10s,
+			c.durationTimedRequests,
+			c.durationWithin10s,
+			c.durationWithin20s,
+			c.claudeRequests,
+			c.cacheDenominatorSum,
+			c.cacheTokensSum,
+			c.cacheWriteSum,
+			c.completionTokensSum,
+			c.useTimeSum,
+		)
 
 		slotData = append(slotData, map[string]interface{}{
-			"slot":           i,
-			"start_time":     slotStart,
-			"end_time":       slotEnd,
-			"total_requests": total,
-			"success_count":  success,
-			"failure_count":  failure,
-			"empty_count":    empty,
-			"success_rate":   roundRate(slotRate),
-			"status":         getStatusColor(slotRate, total),
+			"slot":                     i,
+			"start_time":               slotStart,
+			"end_time":                 slotEnd,
+			"total_requests":           total,
+			"success_count":            success,
+			"failure_count":            failure,
+			"empty_count":              empty,
+			"success_rate":             roundRate(slotRate),
+			"status":                   getStatusColor(slotRate, total),
+			"within_5s_rate":           perf["within_5s_rate"],
+			"within_10s_rate":          perf["within_10s_rate"],
+			"duration_within_10s_rate": perf["duration_within_10s_rate"],
+			"duration_within_20s_rate": perf["duration_within_20s_rate"],
+			"cache_hit_rate":           perf["cache_hit_rate"],
+			"cache_write_rate":         perf["cache_write_rate"],
+			"completion_tps":           perf["completion_tps"],
+			"timed_requests":           perf["timed_requests"],
+			"duration_timed_requests":  perf["duration_timed_requests"],
+			"output_requests":          perf["output_requests"],
 		})
 	}
 	return slotData
@@ -1535,8 +1566,31 @@ func (s *ModelStatusService) accumulateDayRow(snap *daySnapshot, row map[string]
 	}
 	if modelName != "" {
 		accumulateDailyPerformance(snap.models[modelName], row)
+		accumulateSlotPerformance(snap.slots[modelName][slotIdx], row)
 	}
 	accumulateDailyPerformance(chStat, row)
+	accumulateSlotPerformance(chSlot, row)
+}
+
+func accumulateSlotPerformance(slot *slotCounts, row map[string]interface{}) {
+	if slot == nil {
+		return
+	}
+	stats := &dailyPerfStats{}
+	accumulateDailyPerformance(stats, row)
+	slot.timedRequests += stats.timedRequests
+	slot.within5s += stats.within5s
+	slot.within10s += stats.within10s
+	slot.durationTimedRequests += stats.durationTimedRequests
+	slot.durationWithin10s += stats.durationWithin10s
+	slot.durationWithin20s += stats.durationWithin20s
+	slot.outputRequests += stats.outputRequests
+	slot.claudeRequests += stats.claudeRequests
+	slot.cacheDenominatorSum += stats.cacheDenominatorSum
+	slot.cacheTokensSum += stats.cacheTokensSum
+	slot.cacheWriteSum += stats.cacheWriteSum
+	slot.completionTokensSum += stats.completionTokensSum
+	slot.useTimeSum += stats.useTimeSum
 }
 
 // accumulateDailyPerformance mirrors accumulatePerformanceRow but folds into a

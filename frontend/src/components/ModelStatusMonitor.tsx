@@ -27,6 +27,16 @@ interface SlotStatus {
   empty_count: number
   success_rate: number
   status: 'green' | 'yellow' | 'red'
+  within_5s_rate?: number | null
+  within_10s_rate?: number | null
+  duration_within_10s_rate?: number | null
+  duration_within_20s_rate?: number | null
+  cache_hit_rate?: number | null
+  cache_write_rate?: number | null
+  completion_tps?: number | null
+  timed_requests?: number
+  duration_timed_requests?: number
+  output_requests?: number
 }
 
 interface ModelStatus {
@@ -2811,6 +2821,35 @@ function StatusSlotBar({
                   ? (hoveredSlot.empty_count / hoveredSlot.total_requests * 100).toFixed(2)
                   : '0.00'}%
               </span>
+            </div>
+            <div className="my-1 border-t" />
+            <div className="flex justify-between gap-4">
+              <span>首Token ≤5s:</span>
+              <span className="font-medium text-foreground">{formatRate(hoveredSlot.within_5s_rate ?? null)}</span>
+            </div>
+            <div className="flex justify-between gap-4">
+              <span>首Token ≤10s:</span>
+              <span className="font-medium text-foreground">{formatRate(hoveredSlot.within_10s_rate ?? null)}</span>
+            </div>
+            <div className="flex justify-between gap-4">
+              <span>总耗时 ≤10s:</span>
+              <span className="font-medium text-foreground">{formatRate(hoveredSlot.duration_within_10s_rate ?? null)}</span>
+            </div>
+            <div className="flex justify-between gap-4">
+              <span>总耗时 ≤20s:</span>
+              <span className="font-medium text-foreground">{formatRate(hoveredSlot.duration_within_20s_rate ?? null)}</span>
+            </div>
+            <div className="flex justify-between gap-4">
+              <span>缓存命中:</span>
+              <span className="font-medium text-foreground">{formatPreciseRate(hoveredSlot.cache_hit_rate ?? null)}</span>
+            </div>
+            <div className="flex justify-between gap-4">
+              <span>缓存写入:</span>
+              <span className="font-medium text-foreground">{formatCacheWriteRate(hoveredSlot.cache_write_rate)}</span>
+            </div>
+            <div className="flex justify-between gap-4">
+              <span>输出速度:</span>
+              <span className="font-medium text-foreground">{formatTps(hoveredSlot.completion_tps ?? null)}</span>
             </div>
           </div>
         </div>

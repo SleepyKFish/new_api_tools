@@ -59,7 +59,20 @@ func TestModelHistoryRoundTrip(t *testing.T) {
 		},
 		slots: map[string]map[int]*slotCounts{
 			"gpt-4": {
-				0:  {total: 5, success: 4, failure: 1, empty: 0},
+				0: {
+					total:               5,
+					success:             4,
+					failure:             1,
+					empty:               0,
+					timedRequests:       4,
+					within5s:            3,
+					within10s:           4,
+					outputRequests:      4,
+					cacheDenominatorSum: 100,
+					cacheTokensSum:      40,
+					completionTokensSum: 200,
+					useTimeSum:          100,
+				},
 				13: {total: 5, success: 4, failure: 0, empty: 1},
 			},
 		},
@@ -78,7 +91,23 @@ func TestModelHistoryRoundTrip(t *testing.T) {
 		},
 		chanSlot: map[int64]map[int]*slotCounts{
 			7: {
-				0:  {total: 4, success: 3, failure: 1, empty: 0},
+				0: {
+					total:                 4,
+					success:               3,
+					failure:               1,
+					empty:                 0,
+					timedRequests:         3,
+					within5s:              2,
+					durationTimedRequests: 3,
+					durationWithin10s:     2,
+					outputRequests:        3,
+					claudeRequests:        1,
+					cacheDenominatorSum:   100,
+					cacheTokensSum:        25,
+					cacheWriteSum:         10,
+					completionTokensSum:   150,
+					useTimeSum:            50,
+				},
 				13: {total: 5, success: 4, failure: 0, empty: 1},
 			},
 		},
@@ -136,6 +165,9 @@ func TestModelHistoryRoundTrip(t *testing.T) {
 	if slotData[0]["total_requests"].(int64) != 5 {
 		t.Fatalf("slot0 total wrong: %v", slotData[0]["total_requests"])
 	}
+	if slotData[0]["cache_hit_rate"] != 40.0 || slotData[0]["completion_tps"] != 2.0 {
+		t.Fatalf("slot0 performance wrong: %v", slotData[0])
+	}
 	// ghost model -> zero filled
 	ghost := statuses[1]
 	if ghost["total_requests"].(int64) != 0 {
@@ -168,6 +200,9 @@ func TestModelHistoryRoundTrip(t *testing.T) {
 	}
 	if channelSlotData[0]["total_requests"].(int64) != 4 || channelSlotData[0]["success_count"].(int64) != 3 || channelSlotData[0]["failure_count"].(int64) != 1 {
 		t.Fatalf("channel slot0 wrong: %v", channelSlotData[0])
+	}
+	if channelSlotData[0]["cache_hit_rate"] != 25.0 || channelSlotData[0]["cache_write_rate"] != 10.0 || channelSlotData[0]["completion_tps"] != 3.0 {
+		t.Fatalf("channel slot0 performance wrong: %v", channelSlotData[0])
 	}
 	if channelSlotData[13]["total_requests"].(int64) != 5 || channelSlotData[13]["empty_count"].(int64) != 1 {
 		t.Fatalf("channel slot13 wrong: %v", channelSlotData[13])

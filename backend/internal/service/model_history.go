@@ -128,6 +128,19 @@ func (s *ModelHistoryService) ensureSchema() error {
 			success_count INTEGER NOT NULL DEFAULT 0,
 			failure_count INTEGER NOT NULL DEFAULT 0,
 			empty_count INTEGER NOT NULL DEFAULT 0,
+			timed_requests INTEGER NOT NULL DEFAULT 0,
+			within_5s INTEGER NOT NULL DEFAULT 0,
+			within_10s INTEGER NOT NULL DEFAULT 0,
+			duration_timed_requests INTEGER NOT NULL DEFAULT 0,
+			duration_within_10s INTEGER NOT NULL DEFAULT 0,
+			duration_within_20s INTEGER NOT NULL DEFAULT 0,
+			output_requests INTEGER NOT NULL DEFAULT 0,
+			claude_requests INTEGER NOT NULL DEFAULT 0,
+			cache_denominator_sum REAL NOT NULL DEFAULT 0,
+			cache_tokens_sum REAL NOT NULL DEFAULT 0,
+			cache_write_sum REAL NOT NULL DEFAULT 0,
+			completion_tokens_sum REAL NOT NULL DEFAULT 0,
+			use_time_sum REAL NOT NULL DEFAULT 0,
 			PRIMARY KEY (date, model_name, slot_idx)
 		)`,
 		`CREATE TABLE IF NOT EXISTS model_daily_channel (
@@ -161,6 +174,19 @@ func (s *ModelHistoryService) ensureSchema() error {
 			success_count INTEGER NOT NULL DEFAULT 0,
 			failure_count INTEGER NOT NULL DEFAULT 0,
 			empty_count INTEGER NOT NULL DEFAULT 0,
+			timed_requests INTEGER NOT NULL DEFAULT 0,
+			within_5s INTEGER NOT NULL DEFAULT 0,
+			within_10s INTEGER NOT NULL DEFAULT 0,
+			duration_timed_requests INTEGER NOT NULL DEFAULT 0,
+			duration_within_10s INTEGER NOT NULL DEFAULT 0,
+			duration_within_20s INTEGER NOT NULL DEFAULT 0,
+			output_requests INTEGER NOT NULL DEFAULT 0,
+			claude_requests INTEGER NOT NULL DEFAULT 0,
+			cache_denominator_sum REAL NOT NULL DEFAULT 0,
+			cache_tokens_sum REAL NOT NULL DEFAULT 0,
+			cache_write_sum REAL NOT NULL DEFAULT 0,
+			completion_tokens_sum REAL NOT NULL DEFAULT 0,
+			use_time_sum REAL NOT NULL DEFAULT 0,
 			PRIMARY KEY (date, channel_id, slot_idx)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_daily_summary_date ON model_daily_summary(date)`,
@@ -181,6 +207,31 @@ func (s *ModelHistoryService) ensureSchema() error {
 	}
 	if err := s.ensureColumn("model_daily_channel", "empty_count", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
+	}
+	perfColumns := []struct {
+		name       string
+		definition string
+	}{
+		{"timed_requests", "INTEGER NOT NULL DEFAULT 0"},
+		{"within_5s", "INTEGER NOT NULL DEFAULT 0"},
+		{"within_10s", "INTEGER NOT NULL DEFAULT 0"},
+		{"duration_timed_requests", "INTEGER NOT NULL DEFAULT 0"},
+		{"duration_within_10s", "INTEGER NOT NULL DEFAULT 0"},
+		{"duration_within_20s", "INTEGER NOT NULL DEFAULT 0"},
+		{"output_requests", "INTEGER NOT NULL DEFAULT 0"},
+		{"claude_requests", "INTEGER NOT NULL DEFAULT 0"},
+		{"cache_denominator_sum", "REAL NOT NULL DEFAULT 0"},
+		{"cache_tokens_sum", "REAL NOT NULL DEFAULT 0"},
+		{"cache_write_sum", "REAL NOT NULL DEFAULT 0"},
+		{"completion_tokens_sum", "REAL NOT NULL DEFAULT 0"},
+		{"use_time_sum", "REAL NOT NULL DEFAULT 0"},
+	}
+	for _, table := range []string{"model_hourly_slot", "channel_hourly_slot"} {
+		for _, col := range perfColumns {
+			if err := s.ensureColumn(table, col.name, col.definition); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -268,6 +319,20 @@ type slotCounts struct {
 	success int64
 	failure int64
 	empty   int64
+
+	timedRequests         int64
+	within5s              int64
+	within10s             int64
+	durationTimedRequests int64
+	durationWithin10s     int64
+	durationWithin20s     int64
+	outputRequests        int64
+	claudeRequests        int64
+	cacheDenominatorSum   float64
+	cacheTokensSum        float64
+	cacheWriteSum         float64
+	completionTokensSum   float64
+	useTimeSum            float64
 }
 
 // SaveDay persists a day snapshot transactionally, replacing any existing rows
@@ -309,15 +374,25 @@ func (s *ModelHistoryService) SaveDay(snap *daySnapshot) error {
 	}
 
 	slotStmt, err := tx.Prepare(`INSERT INTO model_hourly_slot (
-		date, model_name, slot_idx, total_requests, success_count, failure_count, empty_count
-	) VALUES (?,?,?,?,?,?,?)`)
+		date, model_name, slot_idx, total_requests, success_count, failure_count, empty_count,
+		timed_requests, within_5s, within_10s, duration_timed_requests,
+		duration_within_10s, duration_within_20s, output_requests, claude_requests,
+		cache_denominator_sum, cache_tokens_sum, cache_write_sum,
+		completion_tokens_sum, use_time_sum
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
 	defer slotStmt.Close()
 	for name, slots := range snap.slots {
 		for idx, c := range slots {
-			if _, err := slotStmt.Exec(snap.date, name, idx, c.total, c.success, c.failure, c.empty); err != nil {
+			if _, err := slotStmt.Exec(
+				snap.date, name, idx, c.total, c.success, c.failure, c.empty,
+				c.timedRequests, c.within5s, c.within10s, c.durationTimedRequests,
+				c.durationWithin10s, c.durationWithin20s, c.outputRequests, c.claudeRequests,
+				c.cacheDenominatorSum, c.cacheTokensSum, c.cacheWriteSum,
+				c.completionTokensSum, c.useTimeSum,
+			); err != nil {
 				return err
 			}
 		}
@@ -347,15 +422,25 @@ func (s *ModelHistoryService) SaveDay(snap *daySnapshot) error {
 	}
 
 	chanSlotStmt, err := tx.Prepare(`INSERT INTO channel_hourly_slot (
-		date, channel_id, slot_idx, total_requests, success_count, failure_count, empty_count
-	) VALUES (?,?,?,?,?,?,?)`)
+		date, channel_id, slot_idx, total_requests, success_count, failure_count, empty_count,
+		timed_requests, within_5s, within_10s, duration_timed_requests,
+		duration_within_10s, duration_within_20s, output_requests, claude_requests,
+		cache_denominator_sum, cache_tokens_sum, cache_write_sum,
+		completion_tokens_sum, use_time_sum
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
 	defer chanSlotStmt.Close()
 	for channelID, slots := range snap.chanSlot {
 		for idx, c := range slots {
-			if _, err := chanSlotStmt.Exec(snap.date, channelID, idx, c.total, c.success, c.failure, c.empty); err != nil {
+			if _, err := chanSlotStmt.Exec(
+				snap.date, channelID, idx, c.total, c.success, c.failure, c.empty,
+				c.timedRequests, c.within5s, c.within10s, c.durationTimedRequests,
+				c.durationWithin10s, c.durationWithin20s, c.outputRequests, c.claudeRequests,
+				c.cacheDenominatorSum, c.cacheTokensSum, c.cacheWriteSum,
+				c.completionTokensSum, c.useTimeSum,
+			); err != nil {
 				return err
 			}
 		}
@@ -438,7 +523,11 @@ func (s *ModelHistoryService) getModelSummaryRow(date, modelName string) (*daily
 
 // getModelSlots loads stored hourly slots for one model/date keyed by slot_idx.
 func (s *ModelHistoryService) getModelSlots(date, modelName string) (map[int]*slotCounts, error) {
-	rows, err := s.db.Query(`SELECT slot_idx, total_requests, success_count, failure_count, empty_count
+	rows, err := s.db.Query(`SELECT slot_idx, total_requests, success_count, failure_count, empty_count,
+		timed_requests, within_5s, within_10s, duration_timed_requests,
+		duration_within_10s, duration_within_20s, output_requests, claude_requests,
+		cache_denominator_sum, cache_tokens_sum, cache_write_sum,
+		completion_tokens_sum, use_time_sum
 		FROM model_hourly_slot WHERE date = ? AND model_name = ?`, date, modelName)
 	if err != nil {
 		return nil, err
@@ -448,7 +537,13 @@ func (s *ModelHistoryService) getModelSlots(date, modelName string) (map[int]*sl
 	for rows.Next() {
 		var idx int
 		c := &slotCounts{}
-		if err := rows.Scan(&idx, &c.total, &c.success, &c.failure, &c.empty); err != nil {
+		if err := rows.Scan(
+			&idx, &c.total, &c.success, &c.failure, &c.empty,
+			&c.timedRequests, &c.within5s, &c.within10s, &c.durationTimedRequests,
+			&c.durationWithin10s, &c.durationWithin20s, &c.outputRequests, &c.claudeRequests,
+			&c.cacheDenominatorSum, &c.cacheTokensSum, &c.cacheWriteSum,
+			&c.completionTokensSum, &c.useTimeSum,
+		); err != nil {
 			return nil, err
 		}
 		out[idx] = c
@@ -476,31 +571,7 @@ func (s *ModelHistoryService) buildModelStatusFromHistory(date, modelName string
 		return nil, err
 	}
 
-	slotData := make([]map[string]interface{}, 0, historySlotCount)
-	for i := 0; i < historySlotCount; i++ {
-		slotStart := startTS + int64(i)*historySlotSeconds
-		slotEnd := slotStart + historySlotSeconds
-		c := slotMap[i]
-		var total, success, failure, empty int64
-		if c != nil {
-			total, success, failure, empty = c.total, c.success, c.failure, c.empty
-		}
-		slotRate := float64(100)
-		if total > 0 {
-			slotRate = float64(success) / float64(total) * 100
-		}
-		slotData = append(slotData, map[string]interface{}{
-			"slot":           i,
-			"start_time":     slotStart,
-			"end_time":       slotEnd,
-			"total_requests": total,
-			"success_count":  success,
-			"failure_count":  failure,
-			"empty_count":    empty,
-			"success_rate":   roundRate(slotRate),
-			"status":         getStatusColor(slotRate, total),
-		})
-	}
+	slotData := buildAvailabilitySlotData(slotMap, startTS, historySlotSeconds, historySlotCount)
 
 	overallRate := float64(100)
 	if st.totalRequests > 0 {
@@ -619,7 +690,11 @@ func (s *ModelHistoryService) GetChannelPerformanceByDate(date string) ([]map[st
 }
 
 func (s *ModelHistoryService) getChannelSlots(date string, channelID int64) map[int]*slotCounts {
-	rows, err := s.db.Query(`SELECT slot_idx, total_requests, success_count, failure_count, empty_count
+	rows, err := s.db.Query(`SELECT slot_idx, total_requests, success_count, failure_count, empty_count,
+		timed_requests, within_5s, within_10s, duration_timed_requests,
+		duration_within_10s, duration_within_20s, output_requests, claude_requests,
+		cache_denominator_sum, cache_tokens_sum, cache_write_sum,
+		completion_tokens_sum, use_time_sum
 		FROM channel_hourly_slot WHERE date = ? AND channel_id = ?`, date, channelID)
 	if err != nil {
 		return map[int]*slotCounts{}
@@ -630,7 +705,13 @@ func (s *ModelHistoryService) getChannelSlots(date string, channelID int64) map[
 	for rows.Next() {
 		var idx int
 		c := &slotCounts{}
-		if err := rows.Scan(&idx, &c.total, &c.success, &c.failure, &c.empty); err != nil {
+		if err := rows.Scan(
+			&idx, &c.total, &c.success, &c.failure, &c.empty,
+			&c.timedRequests, &c.within5s, &c.within10s, &c.durationTimedRequests,
+			&c.durationWithin10s, &c.durationWithin20s, &c.outputRequests, &c.claudeRequests,
+			&c.cacheDenominatorSum, &c.cacheTokensSum, &c.cacheWriteSum,
+			&c.completionTokensSum, &c.useTimeSum,
+		); err != nil {
 			return map[int]*slotCounts{}
 		}
 		out[idx] = c
