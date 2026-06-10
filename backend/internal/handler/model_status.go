@@ -2,6 +2,8 @@ package handler
 
 import (
 	"net/http"
+	"regexp"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/new-api-tools/backend/internal/models"
@@ -46,6 +48,13 @@ func RegisterModelStatusRoutes(r *gin.RouterGroup) {
 		g.PUT("/config/site-title", SetSiteTitleConfig)
 		g.POST("/config/site-title", SetSiteTitleConfig)
 		g.GET("/token-groups", GetTokenGroupsForModelStatus)
+
+		// 历史按日期查询（仅有记录的日期可查，当天仍走实时接口）
+		g.GET("/history/dates", GetHistoryDates)
+		g.GET("/history/models", GetHistoryModels)
+		g.POST("/history/status/batch", GetHistoryStatusBatch)
+		g.POST("/history/status/multiple", GetHistoryStatusBatch)
+		g.GET("/history/channels/performance", GetHistoryChannelPerformance)
 	}
 
 }
@@ -468,5 +477,115 @@ func SetSiteTitleConfig(c *gin.Context) {
 		"success":    true,
 		"site_title": req.SiteTitle,
 		"message":    "Site title updated",
+	})
+}
+
+// dateRegex matches YYYY-MM-DD.
+var dateRegex = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+
+func validDate(date string) bool {
+	if !dateRegex.MatchString(date) {
+		return false
+	}
+	_, err := time.Parse("2006-01-02", date)
+	return err == nil
+}
+
+// GET /history/dates — 返回有历史记录的日期列表（倒序）
+func GetHistoryDates(c *gin.Context) {
+	hist, err := service.GetModelHistoryService()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResp("HISTORY_ERROR", err.Error(), ""))
+		return
+	}
+	dates, err := hist.ListAvailableDates()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResp("QUERY_ERROR", err.Error(), ""))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": dates})
+}
+
+// GET /history/models?date=YYYY-MM-DD — 该日期有数据的模型
+func GetHistoryModels(c *gin.Context) {
+	date := c.Query("date")
+	if !validDate(date) {
+		c.JSON(http.StatusBadRequest, models.ErrorResp("INVALID_PARAMS", "Invalid date (expected YYYY-MM-DD)", ""))
+		return
+	}
+	hist, err := service.GetModelHistoryService()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResp("HISTORY_ERROR", err.Error(), ""))
+		return
+	}
+	data, err := hist.GetAvailableModelsByDate(date)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResp("QUERY_ERROR", err.Error(), ""))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": data, "date": date})
+}
+
+// POST /history/status/batch?date=YYYY-MM-DD — 历史状态网格
+func GetHistoryStatusBatch(c *gin.Context) {
+	date := c.Query("date")
+	if !validDate(date) {
+		c.JSON(http.StatusBadRequest, models.ErrorResp("INVALID_PARAMS", "Invalid date (expected YYYY-MM-DD)", ""))
+		return
+	}
+	var modelNames []string
+	if err := c.ShouldBindJSON(&modelNames); err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResp("INVALID_PARAMS", "Expected array of model names", err.Error()))
+		return
+	}
+	hist, err := service.GetModelHistoryService()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResp("HISTORY_ERROR", err.Error(), ""))
+		return
+	}
+	has, err := hist.HasDate(date)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResp("QUERY_ERROR", err.Error(), ""))
+		return
+	}
+	if !has {
+		c.JSON(http.StatusNotFound, models.ErrorResp("NO_DATA", "该日期暂无历史记录", date))
+		return
+	}
+	data, err := hist.GetMultipleModelsStatusByDate(modelNames, date)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResp("QUERY_ERROR", err.Error(), ""))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success":     true,
+		"data":        data,
+		"date":        date,
+		"time_window": "24h",
+	})
+}
+
+// GET /history/channels/performance?date=YYYY-MM-DD — 历史渠道性能
+func GetHistoryChannelPerformance(c *gin.Context) {
+	date := c.Query("date")
+	if !validDate(date) {
+		c.JSON(http.StatusBadRequest, models.ErrorResp("INVALID_PARAMS", "Invalid date (expected YYYY-MM-DD)", ""))
+		return
+	}
+	hist, err := service.GetModelHistoryService()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResp("HISTORY_ERROR", err.Error(), ""))
+		return
+	}
+	data, err := hist.GetChannelPerformanceByDate(date)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResp("QUERY_ERROR", err.Error(), ""))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success":     true,
+		"data":        data,
+		"date":        date,
+		"time_window": "24h",
 	})
 }

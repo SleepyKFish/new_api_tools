@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from './Toast'
 import { cn } from '../lib/utils'
-import { RefreshCw, Loader2, Timer, ChevronDown, Settings2, Check, Clock, Palette, Moon, Sun, Minimize2, Maximize2, Zap, Terminal, Leaf, Droplets, HelpCircle, Copy, X, Command, LayoutGrid, Bot, MessageSquareQuote, Triangle, Sparkles, CreditCard, GitBranch, Gamepad2, Rocket, Brain, ArrowUpDown, GripVertical, Search, Filter, Layers, Plus, Pencil, Trash2, FolderPlus, Tag, KeyRound } from 'lucide-react'
+import { RefreshCw, Loader2, Timer, ChevronDown, Settings2, Check, Clock, Palette, Moon, Sun, Minimize2, Maximize2, Zap, Terminal, Leaf, Droplets, HelpCircle, Copy, X, Command, LayoutGrid, Bot, MessageSquareQuote, Triangle, Sparkles, CreditCard, GitBranch, Gamepad2, Rocket, Brain, ArrowUpDown, GripVertical, Search, Filter, Layers, Plus, Pencil, Trash2, FolderPlus, Tag, KeyRound, CalendarDays } from 'lucide-react'
 import { DndContext, closestCenter, KeyboardSensor, PointerSensor, useSensor, useSensors, DragEndEvent } from '@dnd-kit/core'
 import { SortableContext, sortableKeyboardCoordinates, rectSortingStrategy, useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
@@ -417,6 +417,11 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
   const [showIntervalDropdown, setShowIntervalDropdown] = useState(false)
   const [showWindowDropdown, setShowWindowDropdown] = useState(false)
   const [showThemeDropdown, setShowThemeDropdown] = useState(false)
+  // 历史按日期查询: selectedDate 为空表示实时(走原方案), 否则查询该日期的历史快照
+  const [selectedDate, setSelectedDate] = useState('')
+  const [availableDates, setAvailableDates] = useState<string[]>([])
+  const [showDateDropdown, setShowDateDropdown] = useState(false)
+  const dateDropdownRef = useRef<HTMLDivElement>(null)
   const [showEmbedHelp, setShowEmbedHelp] = useState(false)
   const [modelSearchQuery, setModelSearchQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
@@ -456,6 +461,10 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
   useClickOutside(intervalDropdownRef, () => setShowIntervalDropdown(false), showIntervalDropdown)
   useClickOutside(windowDropdownRef, () => setShowWindowDropdown(false), showWindowDropdown)
   useClickOutside(themeDropdownRef, () => setShowThemeDropdown(false), showThemeDropdown)
+  useClickOutside(dateDropdownRef, () => setShowDateDropdown(false), showDateDropdown)
+
+  // 是否处于历史日期查询模式
+  const isHistory = selectedDate !== ''
 
   // Fullscreen change listener
   useEffect(() => {
@@ -622,6 +631,22 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
     }
   }, [apiUrl, getApiPrefix, getAuthHeaders])
 
+  // 加载有历史记录的日期列表 (仅非嵌入页支持历史查询)
+  const fetchAvailableDates = useCallback(async () => {
+    if (isEmbed) return
+    try {
+      const response = await fetch(`${apiUrl}/api/model-status/history/dates`, {
+        headers: getAuthHeaders(),
+      })
+      const data = await response.json()
+      if (data.success && Array.isArray(data.data)) {
+        setAvailableDates(data.data)
+      }
+    } catch (error) {
+      console.error('Failed to fetch available dates:', error)
+    }
+  }, [apiUrl, getAuthHeaders, isEmbed])
+
   // Update refresh interval ref
   useEffect(() => {
     refreshIntervalRef.current = refreshInterval
@@ -681,7 +706,10 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
     try {
       // Add no_cache=true when force refreshing to bypass backend cache
       const cacheParam = forceRefresh ? '&no_cache=true' : ''
-      const response = await fetch(`${apiUrl}${getApiPrefix()}/status/batch?window=${timeWindow}${cacheParam}`, {
+      const endpoint = isHistory
+        ? `${apiUrl}${getApiPrefix()}/history/status/batch?date=${selectedDate}`
+        : `${apiUrl}${getApiPrefix()}/status/batch?window=${timeWindow}${cacheParam}`
+      const response = await fetch(endpoint, {
         method: 'POST',
         headers: getAuthHeaders(),
         body: JSON.stringify(selectedModels),
@@ -700,12 +728,15 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
       setLoading(false)
       setRefreshing(false)
     }
-  }, [apiUrl, getApiPrefix, getAuthHeaders, selectedModels, timeWindow, isEmbed, showToast])
+  }, [apiUrl, getApiPrefix, getAuthHeaders, selectedModels, timeWindow, isEmbed, showToast, isHistory, selectedDate])
 
   const fetchChannelSummaries = useCallback(async (forceRefresh = false) => {
     try {
       const cacheParam = forceRefresh ? '&no_cache=true' : ''
-      const response = await fetch(`${apiUrl}${getApiPrefix()}/channels/performance?window=${timeWindow}${cacheParam}`, {
+      const endpoint = isHistory
+        ? `${apiUrl}${getApiPrefix()}/history/channels/performance?date=${selectedDate}`
+        : `${apiUrl}${getApiPrefix()}/channels/performance?window=${timeWindow}${cacheParam}`
+      const response = await fetch(endpoint, {
         headers: getAuthHeaders(),
       })
       const data = await response.json()
@@ -718,17 +749,19 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
         showToast('error', '获取渠道性能失败')
       }
     }
-  }, [apiUrl, getApiPrefix, getAuthHeaders, timeWindow, isEmbed, showToast])
+  }, [apiUrl, getApiPrefix, getAuthHeaders, timeWindow, isEmbed, showToast, isHistory, selectedDate])
 
   // Initial load
   useEffect(() => {
     fetchAvailableModels()
-  }, [fetchAvailableModels])
+    fetchAvailableDates()
+  }, [fetchAvailableModels, fetchAvailableDates])
 
   // Track if models/window changed (not initial load)
   const isInitialMount = useRef(true)
   const prevSelectedModels = useRef<string[]>([])
   const prevTimeWindow = useRef<string>(timeWindow)
+  const prevSelectedDate = useRef<string>(selectedDate)
 
   // Handle model selection and time window changes
   useEffect(() => {
@@ -737,6 +770,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
       isInitialMount.current = false
       prevSelectedModels.current = selectedModels
       prevTimeWindow.current = timeWindow
+      prevSelectedDate.current = selectedDate
       fetchModelStatuses(false)  // Use cache on initial load
       fetchChannelSummaries(false)
       return
@@ -747,26 +781,28 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
       selectedModels.length !== prevSelectedModels.current.length ||
       selectedModels.some(m => !prevSelectedModels.current.includes(m))
     const windowChanged = timeWindow !== prevTimeWindow.current
+    const dateChanged = selectedDate !== prevSelectedDate.current
 
     // Update refs
     prevSelectedModels.current = selectedModels
     prevTimeWindow.current = timeWindow
+    prevSelectedDate.current = selectedDate
 
-    if (modelsChanged) {
-      // Models selection changed - fetch fresh data for new models
+    if (modelsChanged || dateChanged) {
+      // Models selection or date changed - fetch fresh data
       fetchModelStatuses(true)
     } else if (windowChanged) {
       // Only time window changed - can use cache (pre-warmed)
       fetchModelStatuses(false)
     }
-    if (windowChanged) {
+    if (windowChanged || dateChanged) {
       fetchChannelSummaries(false)
     }
-  }, [selectedModels, timeWindow, fetchModelStatuses, fetchChannelSummaries])
+  }, [selectedModels, timeWindow, selectedDate, fetchModelStatuses, fetchChannelSummaries])
 
-  // Auto refresh countdown
+  // Auto refresh countdown (历史模式下禁用自动刷新)
   useEffect(() => {
-    if (refreshInterval === 0) return
+    if (refreshInterval === 0 || isHistory) return
 
     const timer = setInterval(() => {
       setCountdown(prev => {
@@ -1080,7 +1116,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                     </div>
                     <h2 className="text-xl font-semibold tracking-tight whitespace-nowrap">模型状态监控</h2>
                   </div>
-                  <Badge variant="outline" className="font-normal">{TIME_WINDOWS.find(w => w.value === timeWindow)?.label || '24小时'} 滑动窗口</Badge>
+                  <Badge variant="outline" className="font-normal">{isHistory ? `${selectedDate} 历史 · 按小时` : `${TIME_WINDOWS.find(w => w.value === timeWindow)?.label || '24小时'} 滑动窗口`}</Badge>
                 </div>
                 <p className="text-sm text-muted-foreground mt-2 flex items-center flex-wrap gap-x-3 gap-y-1">
                   <span>监控 <span className="font-semibold text-foreground">{selectedModels.length}</span> 个模型</span>
@@ -1101,7 +1137,64 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                 </p>
               </div>
             <div className="flex items-center gap-3">
-              {/* Time Window Selector */}
+              {/* Date Selector (历史按日期查询, 仅非嵌入页) */}
+              {!isEmbed && (
+                <div className="relative" ref={dateDropdownRef}>
+                  <Button
+                    variant={isHistory ? 'default' : 'outline'}
+                    size="sm"
+                    onClick={() => setShowDateDropdown(!showDateDropdown)}
+                    className="h-9"
+                  >
+                    <CalendarDays className="h-4 w-4 mr-2" />
+                    {isHistory ? selectedDate : '实时'}
+                    <ChevronDown className="h-3 w-3 ml-1" />
+                  </Button>
+
+                  {showDateDropdown && (
+                    <div className="absolute right-0 mt-1 w-44 bg-popover border rounded-md shadow-lg z-40">
+                      <div className="p-2 border-b">
+                        <p className="text-xs text-muted-foreground">查询日期</p>
+                      </div>
+                      <div className="p-1 max-h-64 overflow-y-auto">
+                        <button
+                          onClick={() => {
+                            setSelectedDate('')
+                            setShowDateDropdown(false)
+                          }}
+                          className={cn(
+                            "w-full text-left px-3 py-2 text-sm rounded hover:bg-accent transition-colors",
+                            !isHistory && "bg-accent text-accent-foreground"
+                          )}
+                        >
+                          实时（当天）
+                        </button>
+                        {availableDates.length === 0 && (
+                          <p className="px-3 py-2 text-xs text-muted-foreground">暂无历史记录</p>
+                        )}
+                        {availableDates.map((d) => (
+                          <button
+                            key={d}
+                            onClick={() => {
+                              setSelectedDate(d)
+                              setShowDateDropdown(false)
+                            }}
+                            className={cn(
+                              "w-full text-left px-3 py-2 text-sm rounded hover:bg-accent transition-colors tabular-nums",
+                              selectedDate === d && "bg-accent text-accent-foreground"
+                            )}
+                          >
+                            {d}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Time Window Selector (历史模式下隐藏, 历史固定按小时) */}
+              {!isHistory && (
               <div className="relative" ref={windowDropdownRef}>
                 <Button
                   variant="outline"
@@ -1140,6 +1233,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                   </div>
                 )}
               </div>
+              )}
 
               {/* Theme Selector */}
               <div className="relative" ref={themeDropdownRef}>

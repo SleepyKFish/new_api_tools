@@ -31,6 +31,7 @@ var (
 	AvailableRefreshIntervals = []int{0, 30, 60, 120, 300}
 	AvailableSortModes        = []string{"default", "availability", "custom"}
 	performanceLogBatchSize   = 5000
+	modelHistoryBatchInterval = 2 * time.Minute
 )
 
 // Time window slot configurations: {totalSeconds, numSlots, slotSeconds}
@@ -1193,4 +1194,203 @@ func (s *ModelStatusService) GetEmbedConfig() map[string]interface{} {
 	config["available_refresh_intervals"] = AvailableRefreshIntervals
 	config["available_sort_modes"] = AvailableSortModes
 	return config
+}
+
+// AggregateDay scans the main logs table for the given local-day window
+// [date 00:00, next day 00:00) once, building per-model availability slots +
+// performance accumulators and per-channel performance accumulators, then
+// persists them into the SQLite history store. It reuses the same batch-scan
+// and accumulation helpers as the live path so metric semantics stay identical.
+//
+// date must be in YYYY-MM-DD form (interpreted in the server's local timezone).
+func (s *ModelStatusService) AggregateDay(date string) error {
+	hist, err := GetModelHistoryService()
+	if err != nil {
+		return err
+	}
+
+	dayStart, err := time.ParseInLocation("2006-01-02", date, time.Local)
+	if err != nil {
+		return fmt.Errorf("invalid date %q: %w", date, err)
+	}
+	startTime := dayStart.Unix()
+	endTime := dayStart.AddDate(0, 0, 1).Unix()
+
+	snap := &daySnapshot{
+		date:     date,
+		startTS:  startTime,
+		models:   make(map[string]*dailyPerfStats),
+		slots:    make(map[string]map[int]*slotCounts),
+		channels: make(map[int64]*dailyPerfStats),
+		chanName: make(map[int64]string),
+	}
+
+	cursorCreatedAt := startTime - 1
+	cursorID := int64(0)
+	for {
+		rows, err := s.fetchPerformanceLogBatch(startTime, endTime, cursorCreatedAt, cursorID, nil)
+		if err != nil {
+			return err
+		}
+		if len(rows) == 0 {
+			break
+		}
+		for _, row := range rows {
+			s.accumulateDayRow(snap, row, startTime)
+		}
+		lastRow := rows[len(rows)-1]
+		cursorCreatedAt = toInt64(lastRow["created_at"])
+		cursorID = toInt64(lastRow["id"])
+		if len(rows) < performanceLogBatchSize {
+			break
+		}
+		time.Sleep(modelHistoryBatchInterval)
+	}
+
+	// Resolve channel display names for the channels we saw.
+	channelIDs := make([]int64, 0, len(snap.channels))
+	for id := range snap.channels {
+		channelIDs = append(channelIDs, id)
+	}
+	names := s.getChannelNameMap(channelIDs)
+	for id := range snap.channels {
+		if name, ok := names[id]; ok {
+			snap.chanName[id] = name
+		}
+	}
+
+	return hist.SaveDay(snap)
+}
+
+// accumulateDayRow folds a single log row into both the per-model and
+// per-channel accumulators of the snapshot.
+func (s *ModelStatusService) accumulateDayRow(snap *daySnapshot, row map[string]interface{}, startTime int64) {
+	logType := toInt64(row["type"])
+	if logType != 2 && logType != 5 {
+		return
+	}
+	modelName := toString(row["model_name"])
+	createdAt := toInt64(row["created_at"])
+	completion := toFloat64(row["completion_tokens"])
+	channelID := toInt64(row["channel_id"])
+
+	// --- Availability slot counts (hourly) for the model ---
+	if modelName != "" {
+		slotIdx := int((createdAt - startTime) / historySlotSeconds)
+		if slotIdx < 0 {
+			slotIdx = 0
+		}
+		if slotIdx >= historySlotCount {
+			slotIdx = historySlotCount - 1
+		}
+		modelSlots := snap.slots[modelName]
+		if modelSlots == nil {
+			modelSlots = make(map[int]*slotCounts)
+			snap.slots[modelName] = modelSlots
+		}
+		c := modelSlots[slotIdx]
+		if c == nil {
+			c = &slotCounts{}
+			modelSlots[slotIdx] = c
+		}
+		c.total++
+
+		mstat := snap.models[modelName]
+		if mstat == nil {
+			mstat = &dailyPerfStats{}
+			snap.models[modelName] = mstat
+		}
+		mstat.totalRequests++
+
+		switch {
+		case logType == 2 && completion > 0:
+			c.success++
+			mstat.successCount++
+		case logType == 5:
+			c.failure++
+			mstat.failureCount++
+		case logType == 2 && completion == 0:
+			c.empty++
+			mstat.emptyCount++
+		}
+	}
+
+	// --- Performance accumulators (type=2 only, mirrors live path) ---
+	if logType != 2 {
+		return
+	}
+	if modelName != "" {
+		accumulateDailyPerformance(snap.models[modelName], row)
+	}
+	chStat := snap.channels[channelID]
+	if chStat == nil {
+		chStat = &dailyPerfStats{}
+		snap.channels[channelID] = chStat
+	}
+	chStat.totalRequests++
+	accumulateDailyPerformance(chStat, row)
+}
+
+// accumulateDailyPerformance mirrors accumulatePerformanceRow but folds into a
+// dailyPerfStats (which additionally carries availability counters). It only
+// touches the performance accumulators; availability counters are handled by
+// the caller. Assumes the row is a type=2 log.
+func accumulateDailyPerformance(stats *dailyPerfStats, row map[string]interface{}) {
+	if stats == nil {
+		return
+	}
+
+	useTime := toFloat64(row["use_time"])
+	promptTokens := toFloat64(row["prompt_tokens"])
+	completionTokens := toFloat64(row["completion_tokens"])
+	isStream := toBool(row["is_stream"])
+	other := parseOtherJSON(row["other"])
+	frtSeconds := toFloat64(other["frt"]) / 1000.0
+
+	firstTokenTime := useTime
+	if isStream && frtSeconds > 0 {
+		firstTokenTime = frtSeconds
+	}
+	if firstTokenTime > 0 {
+		stats.timedRequests++
+		if firstTokenTime <= 5 {
+			stats.within5s++
+		}
+		if firstTokenTime <= 10 {
+			stats.within10s++
+		}
+	}
+
+	if useTime > 0 {
+		stats.durationTimedRequests++
+		if useTime <= 10 {
+			stats.durationWithin10s++
+		}
+		if useTime <= 20 {
+			stats.durationWithin20s++
+		}
+	}
+
+	if completionTokens > 0 && useTime > 0 {
+		effectiveTime := useTime
+		if isStream && frtSeconds > 0 {
+			effectiveTime = math.Max(useTime-frtSeconds, 1)
+		}
+		stats.outputRequests++
+		stats.completionTokensSum += completionTokens
+		stats.useTimeSum += effectiveTime
+	}
+
+	cacheTokens := toFloat64(other["cache_tokens"])
+	if cacheTokens > 0 {
+		stats.cacheTokensSum += cacheTokens
+	}
+	if isClaudeMessagesRequest(other) {
+		cacheWriteTokens := cacheWriteTokensFromOther(other)
+		stats.cacheDenominatorSum += promptTokens + cacheTokens + cacheWriteTokens
+		stats.cacheWriteSum += cacheWriteTokens
+		stats.claudeRequests++
+	} else {
+		stats.cacheDenominatorSum += math.Max(promptTokens, cacheTokens)
+	}
 }

@@ -116,6 +116,10 @@ func main() {
 	stopIPEnforce := make(chan struct{})
 	go backgroundEnforceIPRecording(stopIPEnforce)
 
+	// 模型监控历史: 初始化 SQLite 历史库, 启动补算昨天, 每天凌晨 1 点统计前一天
+	stopModelHistory := make(chan struct{})
+	go backgroundModelHistory(stopModelHistory)
+
 	// ========== 8. Start server with graceful shutdown ==========
 	srv := &http.Server{
 		Addr:         cfg.ServerAddr(),
@@ -142,6 +146,7 @@ func main() {
 
 	// Stop background tasks
 	close(stopIPEnforce)
+	close(stopModelHistory)
 
 	// Give the server 10 seconds to finish processing requests
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -235,4 +240,73 @@ func toInt64(v interface{}) int64 {
 	default:
 		return 0
 	}
+}
+
+// backgroundModelHistory initializes the SQLite history store, backfills
+// yesterday's snapshot if missing (so the feature is usable immediately), and
+// then aggregates the just-finished day at ~01:00 local time each day.
+func backgroundModelHistory(stop <-chan struct{}) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.L.Error(fmt.Sprintf("[模型历史] 后台任务 panic: %v", r))
+		}
+	}()
+
+	// Wait a bit after startup so DB/indexes settle before the first scan.
+	select {
+	case <-time.After(15 * time.Second):
+	case <-stop:
+		return
+	}
+
+	hist, err := service.GetModelHistoryService()
+	if err != nil {
+		logger.L.Error("[模型历史] 历史库初始化失败: " + err.Error())
+		return
+	}
+
+	// Startup backfill: aggregate yesterday if not already stored.
+	yesterday := time.Now().In(time.Local).AddDate(0, 0, -1).Format("2006-01-02")
+	if has, err := hist.HasDate(yesterday); err == nil && !has {
+		logger.L.System("[模型历史] 启动补算昨天数据: " + yesterday)
+		aggregateModelHistoryDay(yesterday)
+	} else if err != nil {
+		logger.L.Warn("[模型历史] 检查昨天数据失败: " + err.Error())
+	}
+
+	logger.L.System("[模型历史] 定时统计任务已启动 (每天 01:00 统计前一天)")
+
+	for {
+		now := time.Now().In(time.Local)
+		// Next run at 01:00 local time.
+		next := time.Date(now.Year(), now.Month(), now.Day(), 1, 0, 0, 0, time.Local)
+		if !next.After(now) {
+			next = next.AddDate(0, 0, 1)
+		}
+		wait := time.Until(next)
+
+		select {
+		case <-time.After(wait):
+			day := time.Now().In(time.Local).AddDate(0, 0, -1).Format("2006-01-02")
+			logger.L.System("[模型历史] 开始统计前一天数据: " + day)
+			aggregateModelHistoryDay(day)
+		case <-stop:
+			logger.L.System("[模型历史] 定时统计任务已停止")
+			return
+		}
+	}
+}
+
+func aggregateModelHistoryDay(date string) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.L.Error(fmt.Sprintf("[模型历史] 统计 %s panic: %v", date, r))
+		}
+	}()
+	svc := service.NewModelStatusService()
+	if err := svc.AggregateDay(date); err != nil {
+		logger.L.Warn(fmt.Sprintf("[模型历史] 统计 %s 失败: %s", date, err.Error()))
+		return
+	}
+	logger.L.Success("[模型历史] 统计完成: " + date)
 }
