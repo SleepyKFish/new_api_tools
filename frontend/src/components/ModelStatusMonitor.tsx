@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from './Toast'
 import { cn } from '../lib/utils'
-import { RefreshCw, Loader2, Timer, ChevronDown, Settings2, Check, Clock, Palette, Moon, Sun, Minimize2, Maximize2, Zap, Terminal, Leaf, Droplets, HelpCircle, Copy, X, Command, LayoutGrid, Bot, MessageSquareQuote, Triangle, Sparkles, CreditCard, GitBranch, Gamepad2, Rocket, Brain, ArrowUpDown, GripVertical, Search, Filter, Layers, Plus, Pencil, Trash2, FolderPlus, Tag, KeyRound, CalendarDays } from 'lucide-react'
+import { RefreshCw, Loader2, Timer, ChevronDown, Settings2, Check, Clock, Palette, Moon, Sun, Minimize2, Maximize2, Zap, Terminal, Leaf, Droplets, HelpCircle, Copy, X, Command, LayoutGrid, Bot, MessageSquareQuote, Triangle, Sparkles, CreditCard, GitBranch, Gamepad2, Rocket, Brain, ArrowUpDown, Search, Filter, Layers, Plus, Pencil, Trash2, FolderPlus, Tag, KeyRound, CalendarDays } from 'lucide-react'
 import { DndContext, closestCenter, KeyboardSensor, PointerSensor, useSensor, useSensors, DragEndEvent } from '@dnd-kit/core'
 import { SortableContext, sortableKeyboardCoordinates, rectSortingStrategy, useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
@@ -2377,8 +2377,7 @@ function GroupManagerModal({ groups, allModels, onSave, onClose }: GroupManagerM
 
 interface ModelStatusCardProps {
   model: ModelStatus
-  dragHandleProps?: React.HTMLAttributes<HTMLDivElement>
-  dragHandleRef?: (element: HTMLElement | null) => void
+  isDraggable?: boolean
 }
 
 // Sortable wrapper for ModelStatusCard
@@ -2387,7 +2386,6 @@ function SortableModelCard({ model }: { model: ModelStatus }) {
     attributes,
     listeners,
     setNodeRef,
-    setActivatorNodeRef,
     transform,
     transition,
     isDragging,
@@ -2401,12 +2399,14 @@ function SortableModelCard({ model }: { model: ModelStatus }) {
   }
 
   return (
-    <div ref={setNodeRef} style={style}>
-      <ModelStatusCard
-        model={model}
-        dragHandleProps={{ ...attributes, ...listeners }}
-        dragHandleRef={setActivatorNodeRef}
-      />
+    <div
+      ref={setNodeRef}
+      style={style}
+      {...attributes}
+      {...listeners}
+      className="cursor-grab active:cursor-grabbing touch-none"
+    >
+      <ModelStatusCard model={model} isDraggable />
     </div>
   )
 }
@@ -2776,7 +2776,7 @@ function StatusSlotBar({
   )
 }
 
-function ModelStatusCard({ model, dragHandleProps, dragHandleRef }: ModelStatusCardProps) {
+function ModelStatusCard({ model, isDraggable }: ModelStatusCardProps) {
 
   // Success rate color based on status
   const rateColorClass = model.current_status === 'green' ? 'text-green-600 dark:text-green-400'
@@ -2804,18 +2804,8 @@ function ModelStatusCard({ model, dragHandleProps, dragHandleRef }: ModelStatusC
       cardStatusClass
     )}>
       <div className="px-4 pt-3 pb-3">
-        {/* Header row: drag handle + logo + name + badge + stats */}
-        <div className="flex items-center gap-2 mb-2.5">
-          {dragHandleProps && (
-            <div
-              {...dragHandleProps}
-              ref={dragHandleRef}
-              className="flex items-center justify-center w-7 h-7 -ml-1 cursor-grab active:cursor-grabbing touch-none rounded-md text-muted-foreground/50 hover:text-muted-foreground hover:bg-muted/70 transition-colors flex-shrink-0"
-              title="拖拽排序"
-            >
-              <GripVertical className="h-3.5 w-3.5" />
-            </div>
-          )}
+        {/* Header row: logo + name + badge + stats */}
+        <div className="flex items-center gap-2 mb-2.5" title={isDraggable ? '拖拽卡片排序' : undefined}>
           <div className="flex items-center justify-center w-6 h-6 rounded-md bg-muted/50 flex-shrink-0">
             <ModelLogo modelName={model.model_name} size={16} />
           </div>
