@@ -66,7 +66,9 @@ func TestModelHistoryRoundTrip(t *testing.T) {
 		channels: map[int64]*dailyPerfStats{
 			7: {
 				totalRequests:       9,
-				successCount:        9,
+				successCount:        7,
+				failureCount:        1,
+				emptyCount:          1,
 				timedRequests:       9,
 				within5s:            5,
 				outputRequests:      9,
@@ -147,6 +149,12 @@ func TestModelHistoryRoundTrip(t *testing.T) {
 	}
 	if chans[0]["total_requests"].(int64) != 9 {
 		t.Fatalf("channel total_requests wrong: %v", chans[0]["total_requests"])
+	}
+	if chans[0]["success_count"].(int64) != 7 || chans[0]["failure_count"].(int64) != 1 || chans[0]["empty_count"].(int64) != 1 {
+		t.Fatalf("channel availability counts wrong: %v", chans[0])
+	}
+	if chans[0]["success_rate"].(float64) != 77.78 {
+		t.Fatalf("channel success_rate wrong: %v", chans[0]["success_rate"])
 	}
 
 	// Idempotent re-save: same date should replace, not duplicate.

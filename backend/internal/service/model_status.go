@@ -587,6 +587,90 @@ func accumulatePerformanceRow(stats *performanceStats, row map[string]interface{
 	}
 }
 
+type availabilityStats struct {
+	totalRequests int64
+	successCount  int64
+	failureCount  int64
+	emptyCount    int64
+	slots         map[int]*slotCounts
+}
+
+func newAvailabilityStats() *availabilityStats {
+	return &availabilityStats{slots: make(map[int]*slotCounts)}
+}
+
+func (s *availabilityStats) accumulate(row map[string]interface{}, startTime int64, slotSeconds int64, numSlots int) {
+	if s == nil {
+		return
+	}
+	logType := toInt64(row["type"])
+	if logType != 2 && logType != 5 {
+		return
+	}
+
+	createdAt := toInt64(row["created_at"])
+	slotIdx := int((createdAt - startTime) / slotSeconds)
+	if slotIdx < 0 {
+		slotIdx = 0
+	}
+	if slotIdx >= numSlots {
+		slotIdx = numSlots - 1
+	}
+
+	counts := s.slots[slotIdx]
+	if counts == nil {
+		counts = &slotCounts{}
+		s.slots[slotIdx] = counts
+	}
+
+	completion := toFloat64(row["completion_tokens"])
+	s.totalRequests++
+	counts.total++
+
+	switch {
+	case logType == 2 && completion > 0:
+		s.successCount++
+		counts.success++
+	case logType == 5:
+		s.failureCount++
+		counts.failure++
+	case logType == 2 && completion == 0:
+		s.emptyCount++
+		counts.empty++
+	}
+}
+
+func buildAvailabilitySlotData(slots map[int]*slotCounts, startTime int64, slotSeconds int64, numSlots int) []map[string]interface{} {
+	slotData := make([]map[string]interface{}, 0, numSlots)
+	for i := 0; i < numSlots; i++ {
+		slotStart := startTime + int64(i)*slotSeconds
+		slotEnd := slotStart + slotSeconds
+		c := slots[i]
+		var total, success, failure, empty int64
+		if c != nil {
+			total, success, failure, empty = c.total, c.success, c.failure, c.empty
+		}
+
+		slotRate := float64(100)
+		if total > 0 {
+			slotRate = float64(success) / float64(total) * 100
+		}
+
+		slotData = append(slotData, map[string]interface{}{
+			"slot":           i,
+			"start_time":     slotStart,
+			"end_time":       slotEnd,
+			"total_requests": total,
+			"success_count":  success,
+			"failure_count":  failure,
+			"empty_count":    empty,
+			"success_rate":   roundRate(slotRate),
+			"status":         getStatusColor(slotRate, total),
+		})
+	}
+	return slotData
+}
+
 // cacheWriteTokensFromOther mirrors cacheWriteTokensExpr / frontend
 // getUsageLogCacheSummary: prefer normalized cache_write_tokens, then the
 // 5m+1h split, then cache_creation_tokens.
@@ -750,8 +834,11 @@ func (s *ModelStatusService) GetChannelPerformanceSummaries(window string) ([]ma
 
 	now := time.Now().Unix()
 	startTime := now - twConfig.totalSeconds
+	numSlots := twConfig.numSlots
+	slotSeconds := twConfig.slotSeconds
 
 	statsByChannel := make(map[int64]*performanceStats)
+	availabilityByChannel := make(map[int64]*availabilityStats)
 	cursorCreatedAt := startTime - 1
 	cursorID := int64(0)
 	for {
@@ -764,6 +851,13 @@ func (s *ModelStatusService) GetChannelPerformanceSummaries(window string) ([]ma
 		}
 		for _, row := range rows {
 			channelID := toInt64(row["channel_id"])
+			availability := availabilityByChannel[channelID]
+			if availability == nil {
+				availability = newAvailabilityStats()
+				availabilityByChannel[channelID] = availability
+			}
+			availability.accumulate(row, startTime, slotSeconds, numSlots)
+
 			stats := statsByChannel[channelID]
 			if stats == nil {
 				stats = &performanceStats{}
@@ -779,32 +873,42 @@ func (s *ModelStatusService) GetChannelPerformanceSummaries(window string) ([]ma
 		}
 	}
 
-	channelIDs := make([]int64, 0, len(statsByChannel))
-	for channelID := range statsByChannel {
+	channelIDs := make([]int64, 0, len(availabilityByChannel))
+	for channelID := range availabilityByChannel {
 		channelIDs = append(channelIDs, channelID)
 	}
 	channelNames := s.getChannelNameMap(channelIDs)
 
 	type channelStat struct {
-		id    int64
-		stats *performanceStats
+		id           int64
+		stats        *performanceStats
+		availability *availabilityStats
 	}
-	ordered := make([]channelStat, 0, len(statsByChannel))
-	for channelID, stats := range statsByChannel {
-		if stats.successRequests > 0 {
-			ordered = append(ordered, channelStat{id: channelID, stats: stats})
+	ordered := make([]channelStat, 0, len(availabilityByChannel))
+	for channelID, availability := range availabilityByChannel {
+		if availability.totalRequests > 0 {
+			stats := statsByChannel[channelID]
+			if stats == nil {
+				stats = &performanceStats{}
+			}
+			ordered = append(ordered, channelStat{id: channelID, stats: stats, availability: availability})
 		}
 	}
 	sort.Slice(ordered, func(i, j int) bool {
-		if ordered[i].stats.successRequests == ordered[j].stats.successRequests {
+		if ordered[i].availability.totalRequests == ordered[j].availability.totalRequests {
 			return ordered[i].id < ordered[j].id
 		}
-		return ordered[i].stats.successRequests > ordered[j].stats.successRequests
+		return ordered[i].availability.totalRequests > ordered[j].availability.totalRequests
 	})
 
 	results := make([]map[string]interface{}, 0, len(ordered))
 	for _, item := range ordered {
 		perf := performanceSummaryFromStats(item.stats)
+		availability := item.availability
+		successRate := float64(100)
+		if availability.totalRequests > 0 {
+			successRate = float64(availability.successCount) / float64(availability.totalRequests) * 100
+		}
 		channelName := channelNames[item.id]
 		if channelName == "" {
 			channelName = fmt.Sprintf("Channel#%d", item.id)
@@ -812,7 +916,12 @@ func (s *ModelStatusService) GetChannelPerformanceSummaries(window string) ([]ma
 		results = append(results, map[string]interface{}{
 			"channel_id":               item.id,
 			"channel_name":             channelName,
-			"total_requests":           perf["total_requests"],
+			"total_requests":           availability.totalRequests,
+			"success_count":            availability.successCount,
+			"failure_count":            availability.failureCount,
+			"empty_count":              availability.emptyCount,
+			"success_rate":             roundRate(successRate),
+			"current_status":           getStatusColor(successRate, availability.totalRequests),
 			"within_5s_rate":           perf["within_5s_rate"],
 			"within_10s_rate":          perf["within_10s_rate"],
 			"duration_within_10s_rate": perf["duration_within_10s_rate"],
@@ -823,6 +932,7 @@ func (s *ModelStatusService) GetChannelPerformanceSummaries(window string) ([]ma
 			"timed_requests":           perf["timed_requests"],
 			"duration_timed_requests":  perf["duration_timed_requests"],
 			"output_requests":          perf["output_requests"],
+			"slot_data":                buildAvailabilitySlotData(availability.slots, startTime, slotSeconds, numSlots),
 		})
 	}
 
@@ -1389,6 +1499,21 @@ func (s *ModelStatusService) accumulateDayRow(snap *daySnapshot, row map[string]
 		}
 	}
 
+	chStat := snap.channels[channelID]
+	if chStat == nil {
+		chStat = &dailyPerfStats{}
+		snap.channels[channelID] = chStat
+	}
+	chStat.totalRequests++
+	switch {
+	case logType == 2 && completion > 0:
+		chStat.successCount++
+	case logType == 5:
+		chStat.failureCount++
+	case logType == 2 && completion == 0:
+		chStat.emptyCount++
+	}
+
 	// --- Performance accumulators (type=2 only, mirrors live path) ---
 	if logType != 2 {
 		return
@@ -1396,12 +1521,6 @@ func (s *ModelStatusService) accumulateDayRow(snap *daySnapshot, row map[string]
 	if modelName != "" {
 		accumulateDailyPerformance(snap.models[modelName], row)
 	}
-	chStat := snap.channels[channelID]
-	if chStat == nil {
-		chStat = &dailyPerfStats{}
-		snap.channels[channelID] = chStat
-	}
-	chStat.totalRequests++
 	accumulateDailyPerformance(chStat, row)
 }
 

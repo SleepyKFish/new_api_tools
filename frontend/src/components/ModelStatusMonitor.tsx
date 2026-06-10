@@ -56,6 +56,11 @@ interface ChannelPerformance {
   channel_id: number
   channel_name: string
   total_requests: number
+  success_count: number
+  failure_count: number
+  empty_count: number
+  success_rate: number
+  current_status: 'green' | 'yellow' | 'red'
   within_5s_rate: number | null
   within_10s_rate: number | null
   duration_within_10s_rate: number | null
@@ -66,6 +71,7 @@ interface ChannelPerformance {
   timed_requests: number
   duration_timed_requests: number
   output_requests: number
+  slot_data: SlotStatus[]
 }
 
 interface ModelStatusMonitorProps {
@@ -1688,15 +1694,40 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                 <Card key={channel.channel_id} className="border border-border/60 shadow-none">
                   <CardContent className="p-3.5">
                     <div className="flex items-center justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="text-sm font-medium truncate" title={channel.channel_name}>
-                          {channel.channel_name}
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <div className="text-sm font-medium truncate" title={channel.channel_name}>
+                            {channel.channel_name}
+                          </div>
+                          <Badge
+                            variant={channel.current_status === 'green' ? 'success' : channel.current_status === 'yellow' ? 'warning' : 'destructive'}
+                            className="text-[10px] px-1.5 py-0 h-5 flex-shrink-0"
+                          >
+                            {STATUS_LABELS[channel.current_status]}
+                          </Badge>
                         </div>
                         <div className="text-[11px] text-muted-foreground mt-1">
                           渠道 #{channel.channel_id} · 请求 {channel.total_requests.toLocaleString()}
                         </div>
                       </div>
-                      <div className="text-right text-[11px] text-muted-foreground">
+                      <div className="text-right text-[11px] text-muted-foreground flex-shrink-0">
+                        <div>
+                          成功率 <span className={cn(
+                            "font-semibold tabular-nums",
+                            channel.current_status === 'green' ? 'text-green-600 dark:text-green-400' :
+                              channel.current_status === 'yellow' ? 'text-yellow-600 dark:text-yellow-400' :
+                                'text-red-600 dark:text-red-400'
+                          )}>{channel.success_rate}%</span>
+                        </div>
+                        <div>
+                          失败 <span className="font-medium text-red-600 tabular-nums">
+                            {channel.total_requests > 0 ? (channel.failure_count / channel.total_requests * 100).toFixed(2) : '0.00'}%
+                          </span>
+                          <span className="mx-1 text-muted-foreground/40">·</span>
+                          空 <span className="font-medium text-amber-600 tabular-nums">
+                            {channel.total_requests > 0 ? (channel.empty_count / channel.total_requests * 100).toFixed(2) : '0.00'}%
+                          </span>
+                        </div>
                         <div>首Token计时 {channel.timed_requests.toLocaleString()}</div>
                         <div>总耗时计时 {channel.duration_timed_requests.toLocaleString()}</div>
                         <div>输出样本 {channel.output_requests.toLocaleString()}</div>
@@ -1712,6 +1743,12 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                       <MetricPill label="缓存" detail="写比例" value={formatCacheWriteRate(channel.cache_write_rate)} tone="amber" />
                       <MetricPill label="输出速度" detail="tok/s" value={formatTps(channel.completion_tps)} tone="amber" />
                     </div>
+
+                    {channel.slot_data && channel.slot_data.length > 0 && (
+                      <div className="mt-3">
+                        <StatusSlotBar slots={channel.slot_data} timeWindow={timeWindow} />
+                      </div>
+                    )}
                   </CardContent>
                 </Card>
               ))}
@@ -2578,7 +2615,13 @@ function MetricPill({
   )
 }
 
-function ModelStatusCard({ model, dragHandleProps }: ModelStatusCardProps) {
+function StatusSlotBar({
+  slots,
+  timeWindow,
+}: {
+  slots: SlotStatus[]
+  timeWindow: string
+}) {
   const [hoveredSlot, setHoveredSlot] = useState<SlotStatus | null>(null)
   const [tooltipPosition, setTooltipPosition] = useState({ x: 0, y: 0 })
   const [tooltipFlipped, setTooltipFlipped] = useState(false)
@@ -2599,17 +2642,113 @@ function ModelStatusCard({ model, dragHandleProps }: ModelStatusCardProps) {
   }
 
   const getTimeLabels = () => {
-    switch (model.time_window) {
+    switch (timeWindow) {
       case '15m': return ['15m前', '7m前', '现在']
       case '30m': return ['30m前', '15m前', '现在']
       case '1h': return ['60m前', '30m前', '现在']
       case '6h': return ['6h前', '3h前', '现在']
       case '12h': return ['12h前', '6h前', '现在']
-      default: return ['24h前', '12h前', '现在']
+      case '24h': return ['24h前', '12h前', '现在']
+      default:
+        if (slots.length > 0) {
+          return [formatDateTime(slots[0].start_time), formatDateTime(slots[Math.floor(slots.length / 2)].start_time), '现在']
+        }
+        return ['', '', '现在']
     }
   }
 
   const timeLabels = getTimeLabels()
+
+  return (
+    <div className="relative">
+      <div className="flex gap-[3px]">
+        {slots.map((slot, index) => (
+          <div
+            key={index}
+            className={cn(
+              "flex-1 h-5 cursor-pointer transition-all hover:ring-1.5 hover:ring-primary hover:ring-offset-1 hover:scale-y-110",
+              index === 0 ? "rounded-l-md rounded-r-sm" :
+                index === slots.length - 1 ? "rounded-r-md rounded-l-sm" :
+                  "rounded-sm",
+              slot.total_requests === 0 ? STATUS_COLORS.empty : STATUS_COLORS[slot.status],
+              "animate-in fade-in-0 duration-300"
+            )}
+            style={{ animationDelay: `${index * 15}ms` }}
+            onMouseEnter={(e) => handleMouseEnter(slot, e)}
+            onMouseLeave={() => setHoveredSlot(null)}
+          />
+        ))}
+      </div>
+
+      <div className="flex justify-between mt-1.5 text-[10px] text-muted-foreground/60">
+        <span>{timeLabels[0]}</span>
+        <span>{timeLabels[1]}</span>
+        <span>{timeLabels[2]}</span>
+      </div>
+
+      {hoveredSlot && (
+        <div
+          className="fixed z-[9999] bg-popover border rounded-lg shadow-xl p-2.5 text-xs pointer-events-none animate-in fade-in-0 zoom-in-95 duration-150"
+          style={{
+            left: tooltipPosition.x,
+            top: tooltipPosition.y,
+            transform: tooltipFlipped ? 'translate(-50%, 0)' : 'translate(-50%, -100%)',
+          }}
+        >
+          <div
+            className={cn(
+              "absolute left-1/2 -translate-x-1/2 w-2 h-2 bg-popover border rotate-45",
+              tooltipFlipped
+                ? "-top-1 border-b-0 border-r-0"
+                : "-bottom-1 border-t-0 border-l-0"
+            )}
+          />
+          <div className="font-medium mb-1.5">
+            {formatDateTime(hoveredSlot.start_time)} - {formatTime(hoveredSlot.end_time)}
+          </div>
+          <div className="space-y-0.5 text-muted-foreground">
+            <div className="flex justify-between gap-4">
+              <span>请求:</span>
+              <span className="font-medium text-foreground">{hoveredSlot.total_requests}</span>
+            </div>
+            <div className="flex justify-between gap-4">
+              <span>成功:</span>
+              <span className="font-medium text-green-600">{hoveredSlot.success_count}</span>
+            </div>
+            <div className="flex justify-between gap-4">
+              <span>成功率:</span>
+              <span className={cn(
+                "font-medium",
+                hoveredSlot.status === 'green' ? 'text-green-600' :
+                  hoveredSlot.status === 'yellow' ? 'text-yellow-600' : 'text-red-600'
+              )}>
+                {hoveredSlot.success_rate}%
+              </span>
+            </div>
+            <div className="flex justify-between gap-4">
+              <span>失败率:</span>
+              <span className="font-medium text-red-600">
+                {hoveredSlot.total_requests > 0
+                  ? (hoveredSlot.failure_count / hoveredSlot.total_requests * 100).toFixed(2)
+                  : '0.00'}%
+              </span>
+            </div>
+            <div className="flex justify-between gap-4">
+              <span>空响应率:</span>
+              <span className="font-medium text-amber-600">
+                {hoveredSlot.total_requests > 0
+                  ? (hoveredSlot.empty_count / hoveredSlot.total_requests * 100).toFixed(2)
+                  : '0.00'}%
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ModelStatusCard({ model, dragHandleProps }: ModelStatusCardProps) {
 
   // Success rate color based on status
   const rateColorClass = model.current_status === 'green' ? 'text-green-600 dark:text-green-400'
@@ -2681,96 +2820,7 @@ function ModelStatusCard({ model, dragHandleProps }: ModelStatusCardProps) {
           <MetricPill label="输出速度" detail="tok/s" value={formatTps(model.completion_tps)} tone="amber" />
         </div>
 
-        {/* Status grid - compact with rounded ends and staggered animation */}
-        <div className="relative">
-          <div className="flex gap-[3px]">
-            {model.slot_data.map((slot, index) => (
-              <div
-                key={index}
-                className={cn(
-                  "flex-1 h-5 cursor-pointer transition-all hover:ring-1.5 hover:ring-primary hover:ring-offset-1 hover:scale-y-110",
-                  // Rounded ends for pill shape
-                  index === 0 ? "rounded-l-md rounded-r-sm" :
-                    index === model.slot_data.length - 1 ? "rounded-r-md rounded-l-sm" :
-                      "rounded-sm",
-                  slot.total_requests === 0 ? STATUS_COLORS.empty : STATUS_COLORS[slot.status],
-                  "animate-in fade-in-0 duration-300"
-                )}
-                style={{ animationDelay: `${index * 15}ms` }}
-                onMouseEnter={(e) => handleMouseEnter(slot, e)}
-                onMouseLeave={() => setHoveredSlot(null)}
-              />
-            ))}
-          </div>
-
-          {/* Time labels */}
-          <div className="flex justify-between mt-1.5 text-[10px] text-muted-foreground/60">
-            <span>{timeLabels[0]}</span>
-            <span>{timeLabels[1]}</span>
-            <span>{timeLabels[2]}</span>
-          </div>
-
-          {/* Tooltip with boundary detection and entrance animation */}
-          {hoveredSlot && (
-            <div
-              className="fixed z-[9999] bg-popover border rounded-lg shadow-xl p-2.5 text-xs pointer-events-none animate-in fade-in-0 zoom-in-95 duration-150"
-              style={{
-                left: tooltipPosition.x,
-                top: tooltipPosition.y,
-                transform: tooltipFlipped ? 'translate(-50%, 0)' : 'translate(-50%, -100%)',
-              }}
-            >
-              {/* Arrow indicator */}
-              <div
-                className={cn(
-                  "absolute left-1/2 -translate-x-1/2 w-2 h-2 bg-popover border rotate-45",
-                  tooltipFlipped
-                    ? "-top-1 border-b-0 border-r-0"
-                    : "-bottom-1 border-t-0 border-l-0"
-                )}
-              />
-              <div className="font-medium mb-1.5">
-                {formatDateTime(hoveredSlot.start_time)} - {formatTime(hoveredSlot.end_time)}
-              </div>
-              <div className="space-y-0.5 text-muted-foreground">
-                <div className="flex justify-between gap-4">
-                  <span>请求:</span>
-                  <span className="font-medium text-foreground">{hoveredSlot.total_requests}</span>
-                </div>
-                <div className="flex justify-between gap-4">
-                  <span>成功:</span>
-                  <span className="font-medium text-green-600">{hoveredSlot.success_count}</span>
-                </div>
-                <div className="flex justify-between gap-4">
-                  <span>成功率:</span>
-                  <span className={cn(
-                    "font-medium",
-                    hoveredSlot.status === 'green' ? 'text-green-600' :
-                      hoveredSlot.status === 'yellow' ? 'text-yellow-600' : 'text-red-600'
-                  )}>
-                    {hoveredSlot.success_rate}%
-                  </span>
-                </div>
-                <div className="flex justify-between gap-4">
-                  <span>失败率:</span>
-                  <span className="font-medium text-red-600">
-                    {hoveredSlot.total_requests > 0
-                      ? (hoveredSlot.failure_count / hoveredSlot.total_requests * 100).toFixed(2)
-                      : '0.00'}%
-                  </span>
-                </div>
-                <div className="flex justify-between gap-4">
-                  <span>空响应率:</span>
-                  <span className="font-medium text-amber-600">
-                    {hoveredSlot.total_requests > 0
-                      ? (hoveredSlot.empty_count / hoveredSlot.total_requests * 100).toFixed(2)
-                      : '0.00'}%
-                  </span>
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
+        <StatusSlotBar slots={model.slot_data} timeWindow={model.time_window} />
       </div>
     </Card>
   )
