@@ -335,6 +335,30 @@ function formatTime(timestamp: number): string {
   })
 }
 
+function formatSlotAxisTime(timestamp: number): string {
+  const date = new Date(timestamp * 1000)
+  return date.toLocaleTimeString('zh-CN', {
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+function formatSlotAxisEndTime(startTimestamp: number, endTimestamp: number): string {
+  const startDate = new Date(startTimestamp * 1000)
+  const endDate = new Date(endTimestamp * 1000)
+  const isFullCalendarDay =
+    endTimestamp - startTimestamp === 24 * 60 * 60 &&
+    startDate.getHours() === 0 &&
+    startDate.getMinutes() === 0 &&
+    endDate.getHours() === 0 &&
+    endDate.getMinutes() === 0
+
+  if (isFullCalendarDay) {
+    return '24:00'
+  }
+  return formatSlotAxisTime(endTimestamp)
+}
+
 function formatDateTime(timestamp: number): string {
   return new Date(timestamp * 1000).toLocaleString('zh-CN', {
     month: '2-digit',
@@ -1770,7 +1794,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
 
                     {channel.slot_data && channel.slot_data.length > 0 && (
                       <div className="mt-3">
-                        <StatusSlotBar slots={channel.slot_data} timeWindow={timeWindow} />
+                        <StatusSlotBar slots={channel.slot_data} />
                       </div>
                     )}
                   </CardContent>
@@ -2645,10 +2669,8 @@ function MetricPill({
 
 function StatusSlotBar({
   slots,
-  timeWindow,
 }: {
   slots: SlotStatus[]
-  timeWindow: string
 }) {
   const [hoveredSlot, setHoveredSlot] = useState<SlotStatus | null>(null)
   const [tooltipPosition, setTooltipPosition] = useState({ x: 0, y: 0 })
@@ -2670,19 +2692,19 @@ function StatusSlotBar({
   }
 
   const getTimeLabels = () => {
-    switch (timeWindow) {
-      case '15m': return ['15m前', '7m前', '现在']
-      case '30m': return ['30m前', '15m前', '现在']
-      case '1h': return ['60m前', '30m前', '现在']
-      case '6h': return ['6h前', '3h前', '现在']
-      case '12h': return ['12h前', '6h前', '现在']
-      case '24h': return ['24h前', '12h前', '现在']
-      default:
-        if (slots.length > 0) {
-          return [formatDateTime(slots[0].start_time), formatDateTime(slots[Math.floor(slots.length / 2)].start_time), '现在']
-        }
-        return ['', '', '现在']
+    if (slots.length === 0) {
+      return ['', '', '']
     }
+
+    const firstSlot = slots[0]
+    const middleSlot = slots[Math.floor(slots.length / 2)]
+    const lastSlot = slots[slots.length - 1]
+
+    return [
+      formatSlotAxisTime(firstSlot.start_time),
+      formatSlotAxisTime(middleSlot.start_time),
+      formatSlotAxisEndTime(firstSlot.start_time, lastSlot.end_time),
+    ]
   }
 
   const timeLabels = getTimeLabels()
@@ -2839,7 +2861,7 @@ function ModelStatusCard({ model, isDraggable }: ModelStatusCardProps) {
           <MetricPill label="输出速度" detail="tok/s" value={formatTps(model.completion_tps)} tone="amber" />
         </div>
 
-        <StatusSlotBar slots={model.slot_data} timeWindow={model.time_window} />
+        <StatusSlotBar slots={model.slot_data} />
       </div>
     </Card>
   )
