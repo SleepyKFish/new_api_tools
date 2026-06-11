@@ -2730,7 +2730,7 @@ function StatusSlotBar({
         ))}
       </div>
 
-      <div className="flex justify-between mt-1.5 text-[10px] text-muted-foreground/60">
+      <div className="flex justify-between mt-1.5 text-[10px] text-muted-foreground/80">
         <span>{timeLabels[0]}</span>
         <span>{timeLabels[1]}</span>
         <span>{timeLabels[2]}</span>
