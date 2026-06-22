@@ -1799,7 +1799,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                         >
                           {STATUS_LABELS[channel.current_status]}
                         </Badge>
-                        <TopMetricStrip
+                        <TopStackedStats
                           successRate={channel.success_rate}
                           successClassName={channel.current_status === 'green' ? 'text-green-600 dark:text-green-400' :
                             channel.current_status === 'yellow' ? 'text-yellow-600 dark:text-yellow-400' :
@@ -1811,7 +1811,6 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                           cacheWriteTokens={channel.cache_write_tokens}
                           inputTokens={channel.total_input_tokens}
                           outputTokens={channel.total_output_tokens}
-                          className="ml-auto mr-2 justify-end text-right"
                         />
                       </div>
 
@@ -2700,7 +2699,7 @@ function MetricPill({
   )
 }
 
-function TopMetricStrip({
+function TopStackedStats({
   successRate,
   successClassName,
   failureRate,
@@ -2710,7 +2709,6 @@ function TopMetricStrip({
   cacheWriteTokens,
   inputTokens,
   outputTokens,
-  className,
 }: {
   successRate: number
   successClassName: string
@@ -2721,25 +2719,41 @@ function TopMetricStrip({
   cacheWriteTokens: number
   inputTokens: number
   outputTokens: number
-  className?: string
 }) {
   const cacheHit = formatTokenRatio(cacheHitTokens, inputTokens)
   const cacheWrite = formatTokenRatio(cacheWriteTokens, inputTokens)
-  const input = formatTokenCount(inputTokens)
   const output = formatTokenCount(outputTokens)
-  const items = [
+  const total = formatTokenCount(inputTokens + outputTokens)
+  const mainItems = [
     { title: '成功率', content: <span className={cn("font-semibold", successClassName)}>{successRate}%</span> },
     { title: '失败率', content: <><span className="text-muted-foreground/70">失 </span><span className="text-red-600 dark:text-red-400">{failureRate}%</span></> },
     { title: '空响应率', content: <><span className="text-muted-foreground/70">空 </span><span className="text-amber-600 dark:text-amber-400">{emptyRate}%</span></> },
     { title: '请求数', content: <span>{totalRequests.toLocaleString()}</span> },
-    { title: cacheHit.full, content: <><span className="text-muted-foreground/70">命中 </span><span className="font-semibold text-amber-600 dark:text-amber-400">{cacheHit.compact}</span></> },
-    { title: cacheWrite.full, content: <><span className="text-muted-foreground/70">写 </span><span className="font-semibold text-amber-600 dark:text-amber-400">{cacheWrite.compact}</span></> },
-    { title: input.full, content: <><span className="text-muted-foreground/70">输入 </span><span className="font-semibold text-sky-600 dark:text-sky-400">{input.compact}</span></> },
-    { title: output.full, content: <><span className="text-muted-foreground/70">输出 </span><span className="font-semibold text-emerald-600 dark:text-emerald-400">{output.compact}</span></> },
+  ]
+  const tokenItems = [
+    { title: cacheHit.full, content: <><span className="text-muted-foreground/70">Hit </span><span className="font-semibold text-amber-600 dark:text-amber-400">{cacheHit.compact}</span></> },
+    { title: cacheWrite.full, content: <><span className="text-muted-foreground/70">Write </span><span className="font-semibold text-amber-600 dark:text-amber-400">{cacheWrite.compact}</span></> },
+    { title: output.full, content: <><span className="text-muted-foreground/70">Output </span><span className="font-semibold text-emerald-600 dark:text-emerald-400">{output.compact}</span></> },
+    { title: total.full, content: <><span className="text-muted-foreground/70">Total </span><span className="font-semibold text-sky-600 dark:text-sky-400">{total.compact}</span></> },
   ]
 
   return (
-    <div className={cn("flex items-center whitespace-nowrap text-[11px] text-muted-foreground tabular-nums", className)}>
+    <div className="ml-auto flex flex-col items-end gap-1 text-xs text-muted-foreground flex-shrink-0 tabular-nums">
+      <InlineStatRow items={mainItems} />
+      <InlineStatRow items={tokenItems} className="text-[11px]" />
+    </div>
+  )
+}
+
+function InlineStatRow({
+  items,
+  className,
+}: {
+  items: Array<{ title: string; content: React.ReactNode }>
+  className?: string
+}) {
+  return (
+    <div className={cn("flex flex-wrap justify-end gap-x-0 gap-y-0.5 leading-tight", className)}>
       {items.map((item, index) => (
         <span key={`${item.title}-${index}`} className="inline-flex items-center" title={item.title}>
           {index > 0 && <span className="mx-1 text-muted-foreground/40">·</span>}
@@ -2923,7 +2937,7 @@ function ModelStatusCard({ model, isDraggable }: ModelStatusCardProps) {
           >
             {STATUS_LABELS[model.current_status]}
           </Badge>
-          <TopMetricStrip
+          <TopStackedStats
             successRate={model.success_rate}
             successClassName={rateColorClass}
             failureRate={failureRate}
@@ -2933,7 +2947,6 @@ function ModelStatusCard({ model, isDraggable }: ModelStatusCardProps) {
             cacheWriteTokens={model.cache_write_tokens}
             inputTokens={model.total_input_tokens}
             outputTokens={model.total_output_tokens}
-            className="ml-auto mr-2 justify-end text-right"
           />
         </div>
 
