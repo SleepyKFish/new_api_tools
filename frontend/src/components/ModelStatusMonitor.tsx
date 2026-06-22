@@ -2731,10 +2731,10 @@ function TopStackedStats({
     { title: '请求数', content: <span>{totalRequests.toLocaleString()}</span> },
   ]
   const tokenItems = [
-    { title: cacheHit.full, content: <><span className="text-muted-foreground/70">Hit </span><span className="font-semibold text-amber-600 dark:text-amber-400">{cacheHit.compact}</span></> },
-    { title: cacheWrite.full, content: <><span className="text-muted-foreground/70">Write </span><span className="font-semibold text-amber-600 dark:text-amber-400">{cacheWrite.compact}</span></> },
-    { title: output.full, content: <><span className="text-muted-foreground/70">Output </span><span className="font-semibold text-emerald-600 dark:text-emerald-400">{output.compact}</span></> },
-    { title: total.full, content: <><span className="text-muted-foreground/70">Total </span><span className="font-semibold text-sky-600 dark:text-sky-400">{total.compact}</span></> },
+    { title: cacheHit.full, content: <><span className="text-muted-foreground/70">命中 </span><span className="font-semibold text-amber-600 dark:text-amber-400">{cacheHit.compact}</span></> },
+    { title: cacheWrite.full, content: <><span className="text-muted-foreground/70">写 </span><span className="font-semibold text-amber-600 dark:text-amber-400">{cacheWrite.compact}</span></> },
+    { title: output.full, content: <><span className="text-muted-foreground/70">输出 </span><span className="font-semibold text-emerald-600 dark:text-emerald-400">{output.compact}</span></> },
+    { title: total.full, content: <><span className="text-muted-foreground/70">总计 </span><span className="font-semibold text-sky-600 dark:text-sky-400">{total.compact}</span></> },
   ]
 
   return (
