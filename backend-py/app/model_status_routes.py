@@ -70,6 +70,11 @@ class ModelStatusItem(BaseModel):
     duration_within_10s_rate: Optional[float] = None
     duration_within_20s_rate: Optional[float] = None
     cache_hit_rate: Optional[float] = None
+    cache_write_rate: Optional[float] = None
+    cache_hit_tokens: int = 0
+    cache_write_tokens: int = 0
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
     completion_tps: Optional[float] = None
     timed_requests: int = 0
     duration_timed_requests: int = 0
@@ -87,6 +92,11 @@ class ChannelPerformanceItem(BaseModel):
     duration_within_10s_rate: Optional[float] = None
     duration_within_20s_rate: Optional[float] = None
     cache_hit_rate: Optional[float] = None
+    cache_write_rate: Optional[float] = None
+    cache_hit_tokens: int = 0
+    cache_write_tokens: int = 0
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
     completion_tps: Optional[float] = None
     timed_requests: int = 0
     duration_timed_requests: int = 0
@@ -180,6 +190,11 @@ def model_status_to_item(status: ModelStatus) -> ModelStatusItem:
         duration_within_10s_rate=status.duration_within_10s_rate,
         duration_within_20s_rate=status.duration_within_20s_rate,
         cache_hit_rate=status.cache_hit_rate,
+        cache_write_rate=status.cache_write_rate,
+        cache_hit_tokens=status.cache_hit_tokens,
+        cache_write_tokens=status.cache_write_tokens,
+        total_input_tokens=status.total_input_tokens,
+        total_output_tokens=status.total_output_tokens,
         completion_tps=status.completion_tps,
         timed_requests=status.timed_requests,
         duration_timed_requests=status.duration_timed_requests,
@@ -210,6 +225,11 @@ def channel_performance_to_item(summary: ChannelPerformanceSummary) -> ChannelPe
         duration_within_10s_rate=summary.duration_within_10s_rate,
         duration_within_20s_rate=summary.duration_within_20s_rate,
         cache_hit_rate=summary.cache_hit_rate,
+        cache_write_rate=summary.cache_write_rate,
+        cache_hit_tokens=summary.cache_hit_tokens,
+        cache_write_tokens=summary.cache_write_tokens,
+        total_input_tokens=summary.total_input_tokens,
+        total_output_tokens=summary.total_output_tokens,
         completion_tps=summary.completion_tps,
         timed_requests=summary.timed_requests,
         duration_timed_requests=summary.duration_timed_requests,

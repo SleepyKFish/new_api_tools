@@ -143,7 +143,14 @@ func roundRate(rate float64) float64 {
 	return math.Round(rate*100) / 100
 }
 
-func buildPerformanceSummary(totalRequests, timedRequests, outputRequests, within5s, within10s, durationTimedRequests, durationWithin10s, durationWithin20s, claudeRequests int64, cacheDenominatorSum, cacheTokensSum, cacheWriteSum, completionTokensSum, useTimeSum float64) map[string]interface{} {
+func roundTokenCount(tokens float64) int64 {
+	if tokens <= 0 {
+		return 0
+	}
+	return int64(math.Round(tokens))
+}
+
+func buildPerformanceSummary(totalRequests, timedRequests, outputRequests, within5s, within10s, durationTimedRequests, durationWithin10s, durationWithin20s, claudeRequests int64, cacheDenominatorSum, cacheTokensSum, cacheWriteSum, cacheWriteTokensSum, inputTokensSum, outputTokensSum, completionTokensSum, useTimeSum float64) map[string]interface{} {
 	var within5sRate interface{}
 	var within10sRate interface{}
 	var durationWithin10sRate interface{}
@@ -188,6 +195,10 @@ func buildPerformanceSummary(totalRequests, timedRequests, outputRequests, withi
 		"duration_within_20s_rate": durationWithin20sRate,
 		"cache_hit_rate":           cacheHitRate,
 		"cache_write_rate":         cacheWriteRate,
+		"cache_hit_tokens":         roundTokenCount(cacheTokensSum),
+		"cache_write_tokens":       roundTokenCount(cacheWriteTokensSum),
+		"total_input_tokens":       roundTokenCount(inputTokensSum),
+		"total_output_tokens":      roundTokenCount(outputTokensSum),
 		"completion_tps":           completionTPS,
 		"timed_requests":           timedRequests,
 		"duration_timed_requests":  durationTimedRequests,
@@ -392,6 +403,9 @@ type performanceStats struct {
 	cacheDenominatorSum   float64
 	cacheTokensSum        float64
 	cacheWriteSum         float64
+	cacheWriteTokensSum   float64
+	inputTokensSum        float64
+	outputTokensSum       float64
 	claudeRequests        int64
 	completionTokensSum   float64
 	useTimeSum            float64
@@ -419,6 +433,9 @@ func performanceSummaryFromStats(stats *performanceStats) map[string]interface{}
 		stats.cacheDenominatorSum,
 		stats.cacheTokensSum,
 		stats.cacheWriteSum,
+		stats.cacheWriteTokensSum,
+		stats.inputTokensSum,
+		stats.outputTokensSum,
 		stats.completionTokensSum,
 		stats.useTimeSum,
 	)
@@ -524,6 +541,16 @@ func isClaudeMessagesRequest(other map[string]interface{}) bool {
 	return strings.Contains(requestPath, "/v1/messages")
 }
 
+func inputTokensFromLog(promptTokens, cacheTokens, cacheWriteTokens float64, isClaude bool, other map[string]interface{}) float64 {
+	if explicit := toFloat64(other["input_tokens_total"]); explicit > 0 {
+		return explicit
+	}
+	if isClaude {
+		return promptTokens + cacheTokens + cacheWriteTokens
+	}
+	return math.Max(promptTokens, cacheTokens)
+}
+
 func accumulatePerformanceRow(stats *performanceStats, row map[string]interface{}) {
 	if stats == nil || toInt64(row["type"]) != 2 {
 		return
@@ -576,9 +603,19 @@ func accumulatePerformanceRow(stats *performanceStats, row map[string]interface{
 	if cacheTokens > 0 {
 		stats.cacheTokensSum += cacheTokens
 	}
-	if isClaudeMessagesRequest(other) {
+	cacheWriteTokens := cacheWriteTokensFromOther(other)
+	if cacheWriteTokens > 0 {
+		stats.cacheWriteTokensSum += cacheWriteTokens
+	}
+	isClaude := isClaudeMessagesRequest(other)
+	if inputTokens := inputTokensFromLog(promptTokens, cacheTokens, cacheWriteTokens, isClaude, other); inputTokens > 0 {
+		stats.inputTokensSum += inputTokens
+	}
+	if completionTokens > 0 {
+		stats.outputTokensSum += completionTokens
+	}
+	if isClaude {
 		// 与 SQL 路径保持一致: Claude 分母 = prompt + 缓存读 + 缓存写
-		cacheWriteTokens := cacheWriteTokensFromOther(other)
 		stats.cacheDenominatorSum += promptTokens + cacheTokens + cacheWriteTokens
 		stats.cacheWriteSum += cacheWriteTokens
 		stats.claudeRequests++
@@ -673,6 +710,9 @@ func buildAvailabilitySlotData(slots map[int]*slotCounts, startTime int64, slotS
 			c.cacheDenominatorSum,
 			c.cacheTokensSum,
 			c.cacheWriteSum,
+			c.cacheWriteTokensSum,
+			c.inputTokensSum,
+			c.outputTokensSum,
 			c.completionTokensSum,
 			c.useTimeSum,
 		)
@@ -693,6 +733,10 @@ func buildAvailabilitySlotData(slots map[int]*slotCounts, startTime int64, slotS
 			"duration_within_20s_rate": perf["duration_within_20s_rate"],
 			"cache_hit_rate":           perf["cache_hit_rate"],
 			"cache_write_rate":         perf["cache_write_rate"],
+			"cache_hit_tokens":         perf["cache_hit_tokens"],
+			"cache_write_tokens":       perf["cache_write_tokens"],
+			"total_input_tokens":       perf["total_input_tokens"],
+			"total_output_tokens":      perf["total_output_tokens"],
 			"completion_tps":           perf["completion_tps"],
 			"timed_requests":           perf["timed_requests"],
 			"duration_timed_requests":  perf["duration_timed_requests"],
@@ -959,6 +1003,10 @@ func (s *ModelStatusService) GetChannelPerformanceSummaries(window string) ([]ma
 			"duration_within_20s_rate": perf["duration_within_20s_rate"],
 			"cache_hit_rate":           perf["cache_hit_rate"],
 			"cache_write_rate":         perf["cache_write_rate"],
+			"cache_hit_tokens":         perf["cache_hit_tokens"],
+			"cache_write_tokens":       perf["cache_write_tokens"],
+			"total_input_tokens":       perf["total_input_tokens"],
+			"total_output_tokens":      perf["total_output_tokens"],
 			"completion_tps":           perf["completion_tps"],
 			"timed_requests":           perf["timed_requests"],
 			"duration_timed_requests":  perf["duration_timed_requests"],
@@ -1137,6 +1185,10 @@ func (s *ModelStatusService) GetModelStatus(modelName, window string) (map[strin
 		"duration_within_20s_rate": perf["duration_within_20s_rate"],
 		"cache_hit_rate":           perf["cache_hit_rate"],
 		"cache_write_rate":         perf["cache_write_rate"],
+		"cache_hit_tokens":         perf["cache_hit_tokens"],
+		"cache_write_tokens":       perf["cache_write_tokens"],
+		"total_input_tokens":       perf["total_input_tokens"],
+		"total_output_tokens":      perf["total_output_tokens"],
 		"completion_tps":           perf["completion_tps"],
 		"timed_requests":           perf["timed_requests"],
 		"duration_timed_requests":  perf["duration_timed_requests"],
@@ -1170,6 +1222,10 @@ func (s *ModelStatusService) GetMultipleModelsStatus(modelNames []string, window
 			status["duration_within_20s_rate"] = perf["duration_within_20s_rate"]
 			status["cache_hit_rate"] = perf["cache_hit_rate"]
 			status["cache_write_rate"] = perf["cache_write_rate"]
+			status["cache_hit_tokens"] = perf["cache_hit_tokens"]
+			status["cache_write_tokens"] = perf["cache_write_tokens"]
+			status["total_input_tokens"] = perf["total_input_tokens"]
+			status["total_output_tokens"] = perf["total_output_tokens"]
 			status["completion_tps"] = perf["completion_tps"]
 			status["timed_requests"] = perf["timed_requests"]
 			status["duration_timed_requests"] = perf["duration_timed_requests"]
@@ -1589,6 +1645,9 @@ func accumulateSlotPerformance(slot *slotCounts, row map[string]interface{}) {
 	slot.cacheDenominatorSum += stats.cacheDenominatorSum
 	slot.cacheTokensSum += stats.cacheTokensSum
 	slot.cacheWriteSum += stats.cacheWriteSum
+	slot.cacheWriteTokensSum += stats.cacheWriteTokensSum
+	slot.inputTokensSum += stats.inputTokensSum
+	slot.outputTokensSum += stats.outputTokensSum
 	slot.completionTokensSum += stats.completionTokensSum
 	slot.useTimeSum += stats.useTimeSum
 }
@@ -1647,8 +1706,18 @@ func accumulateDailyPerformance(stats *dailyPerfStats, row map[string]interface{
 	if cacheTokens > 0 {
 		stats.cacheTokensSum += cacheTokens
 	}
-	if isClaudeMessagesRequest(other) {
-		cacheWriteTokens := cacheWriteTokensFromOther(other)
+	cacheWriteTokens := cacheWriteTokensFromOther(other)
+	if cacheWriteTokens > 0 {
+		stats.cacheWriteTokensSum += cacheWriteTokens
+	}
+	isClaude := isClaudeMessagesRequest(other)
+	if inputTokens := inputTokensFromLog(promptTokens, cacheTokens, cacheWriteTokens, isClaude, other); inputTokens > 0 {
+		stats.inputTokensSum += inputTokens
+	}
+	if completionTokens > 0 {
+		stats.outputTokensSum += completionTokens
+	}
+	if isClaude {
 		stats.cacheDenominatorSum += promptTokens + cacheTokens + cacheWriteTokens
 		stats.cacheWriteSum += cacheWriteTokens
 		stats.claudeRequests++

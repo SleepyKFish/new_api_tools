@@ -64,6 +64,10 @@ class ModelStatus:
     duration_within_20s_rate: Optional[float] = None
     cache_hit_rate: Optional[float] = None
     cache_write_rate: Optional[float] = None
+    cache_hit_tokens: int = 0
+    cache_write_tokens: int = 0
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
     completion_tps: Optional[float] = None
     timed_requests: int = 0
     duration_timed_requests: int = 0
@@ -83,6 +87,10 @@ class ChannelPerformanceSummary:
     duration_within_20s_rate: Optional[float] = None
     cache_hit_rate: Optional[float] = None
     cache_write_rate: Optional[float] = None
+    cache_hit_tokens: int = 0
+    cache_write_tokens: int = 0
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
     completion_tps: Optional[float] = None
     timed_requests: int = 0
     duration_timed_requests: int = 0
@@ -195,6 +203,9 @@ class ModelStatusService:
         total_cache_denominator_tokens: float,
         total_cache_tokens: float,
         total_cache_write_tokens: float,
+        total_cache_write_token_count: float,
+        total_input_tokens: float,
+        total_output_tokens: float,
         total_completion_tokens: float,
         total_use_time: float,
     ) -> Dict[str, Any]:
@@ -218,6 +229,10 @@ class ModelStatusService:
             "duration_within_20s_rate": duration_within_20s_rate,
             "cache_hit_rate": cache_hit_rate,
             "cache_write_rate": cache_write_rate,
+            "cache_hit_tokens": round(max(total_cache_tokens, 0)),
+            "cache_write_tokens": round(max(total_cache_write_token_count, 0)),
+            "total_input_tokens": round(max(total_input_tokens, 0)),
+            "total_output_tokens": round(max(total_output_tokens, 0)),
             "completion_tps": completion_tps,
             "timed_requests": timed_requests,
             "duration_timed_requests": duration_timed_requests,
@@ -492,6 +507,9 @@ class ModelStatusService:
             "cache_denominator_sum": 0.0,
             "cache_tokens_sum": 0.0,
             "cache_write_sum": 0.0,
+            "cache_write_tokens_sum": 0.0,
+            "input_tokens_sum": 0.0,
+            "output_tokens_sum": 0.0,
             "claude_requests": 0,
             "completion_tokens_sum": 0.0,
             "use_time_sum": 0.0,
@@ -512,6 +530,9 @@ class ModelStatusService:
             total_cache_denominator_tokens=float(stats.get("cache_denominator_sum") or 0),
             total_cache_tokens=float(stats.get("cache_tokens_sum") or 0),
             total_cache_write_tokens=float(stats.get("cache_write_sum") or 0),
+            total_cache_write_token_count=float(stats.get("cache_write_tokens_sum") or 0),
+            total_input_tokens=float(stats.get("input_tokens_sum") or 0),
+            total_output_tokens=float(stats.get("output_tokens_sum") or 0),
             total_completion_tokens=float(stats.get("completion_tokens_sum") or 0),
             total_use_time=float(stats.get("use_time_sum") or 0),
         )
@@ -609,6 +630,22 @@ class ModelStatusService:
         ]).lower()
         return "/v1/messages" in request_path
 
+    def _input_tokens_from_log(
+        self,
+        prompt_tokens: float,
+        cache_tokens: float,
+        cache_write_tokens: float,
+        is_claude: bool,
+        other: Dict[str, Any],
+    ) -> float:
+        """Return the best available total input-token count for one log row."""
+        explicit = self._safe_float(other.get("input_tokens_total"))
+        if explicit > 0:
+            return explicit
+        if is_claude:
+            return prompt_tokens + cache_tokens + cache_write_tokens
+        return max(prompt_tokens, cache_tokens)
+
     def _accumulate_performance_row(self, stats: Dict[str, float], row: Dict[str, Any]) -> None:
         """Accumulate one logs row into raw performance counters."""
         if int(row.get("type") or 0) != LOG_TYPE_CONSUMPTION:
@@ -650,9 +687,18 @@ class ModelStatusService:
         if cache_tokens > 0:
             stats["cache_tokens_sum"] += cache_tokens
 
-        if self._is_claude_messages_request(other):
+        cache_write = self._cache_write_tokens_from_other(other)
+        if cache_write > 0:
+            stats["cache_write_tokens_sum"] += cache_write
+        is_claude = self._is_claude_messages_request(other)
+        input_tokens = self._input_tokens_from_log(prompt_tokens, cache_tokens, cache_write, is_claude, other)
+        if input_tokens > 0:
+            stats["input_tokens_sum"] += input_tokens
+        if completion_tokens > 0:
+            stats["output_tokens_sum"] += completion_tokens
+
+        if is_claude:
             # 与 SQL 一致: Claude 分母 = prompt + 缓存读 + 缓存写
-            cache_write = self._cache_write_tokens_from_other(other)
             stats["cache_denominator_sum"] += prompt_tokens + cache_tokens + cache_write
             stats["cache_write_sum"] += cache_write
             stats["claude_requests"] += 1
@@ -857,6 +903,10 @@ class ModelStatusService:
                     duration_within_20s_rate=perf["duration_within_20s_rate"],
                     cache_hit_rate=perf["cache_hit_rate"],
                     cache_write_rate=perf["cache_write_rate"],
+                    cache_hit_tokens=perf["cache_hit_tokens"],
+                    cache_write_tokens=perf["cache_write_tokens"],
+                    total_input_tokens=perf["total_input_tokens"],
+                    total_output_tokens=perf["total_output_tokens"],
                     completion_tps=perf["completion_tps"],
                     timed_requests=perf["timed_requests"],
                     duration_timed_requests=perf["duration_timed_requests"],
@@ -1112,6 +1162,10 @@ class ModelStatusService:
             duration_within_20s_rate=performance.get("duration_within_20s_rate"),
             cache_hit_rate=performance.get("cache_hit_rate"),
             cache_write_rate=performance.get("cache_write_rate"),
+            cache_hit_tokens=performance.get("cache_hit_tokens", 0),
+            cache_write_tokens=performance.get("cache_write_tokens", 0),
+            total_input_tokens=performance.get("total_input_tokens", 0),
+            total_output_tokens=performance.get("total_output_tokens", 0),
             completion_tps=performance.get("completion_tps"),
             timed_requests=performance.get("timed_requests", 0),
             duration_timed_requests=performance.get("duration_timed_requests", 0),
@@ -1280,6 +1334,10 @@ class ModelStatusService:
                 duration_within_20s_rate=performance_map.get(model_name, {}).get("duration_within_20s_rate"),
                 cache_hit_rate=performance_map.get(model_name, {}).get("cache_hit_rate"),
                 cache_write_rate=performance_map.get(model_name, {}).get("cache_write_rate"),
+                cache_hit_tokens=performance_map.get(model_name, {}).get("cache_hit_tokens", 0),
+                cache_write_tokens=performance_map.get(model_name, {}).get("cache_write_tokens", 0),
+                total_input_tokens=performance_map.get(model_name, {}).get("total_input_tokens", 0),
+                total_output_tokens=performance_map.get(model_name, {}).get("total_output_tokens", 0),
                 completion_tps=performance_map.get(model_name, {}).get("completion_tps"),
                 timed_requests=performance_map.get(model_name, {}).get("timed_requests", 0),
                 duration_timed_requests=performance_map.get(model_name, {}).get("duration_timed_requests", 0),
@@ -1336,6 +1394,10 @@ class ModelStatusService:
             "duration_within_20s_rate": status.duration_within_20s_rate,
             "cache_hit_rate": status.cache_hit_rate,
             "cache_write_rate": status.cache_write_rate,
+            "cache_hit_tokens": status.cache_hit_tokens,
+            "cache_write_tokens": status.cache_write_tokens,
+            "total_input_tokens": status.total_input_tokens,
+            "total_output_tokens": status.total_output_tokens,
             "completion_tps": status.completion_tps,
             "timed_requests": status.timed_requests,
             "duration_timed_requests": status.duration_timed_requests,
@@ -1362,6 +1424,10 @@ class ModelStatusService:
             duration_within_20s_rate=data.get("duration_within_20s_rate"),
             cache_hit_rate=data.get("cache_hit_rate"),
             cache_write_rate=data.get("cache_write_rate"),
+            cache_hit_tokens=data.get("cache_hit_tokens", 0),
+            cache_write_tokens=data.get("cache_write_tokens", 0),
+            total_input_tokens=data.get("total_input_tokens", 0),
+            total_output_tokens=data.get("total_output_tokens", 0),
             completion_tps=data.get("completion_tps"),
             timed_requests=data.get("timed_requests", 0),
             duration_timed_requests=data.get("duration_timed_requests", 0),

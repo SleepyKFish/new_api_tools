@@ -51,6 +51,9 @@ type dailyPerfStats struct {
 	cacheDenominatorSum   float64
 	cacheTokensSum        float64
 	cacheWriteSum         float64
+	cacheWriteTokensSum   float64
+	inputTokensSum        float64
+	outputTokensSum       float64
 	completionTokensSum   float64
 	useTimeSum            float64
 }
@@ -115,6 +118,9 @@ func (s *ModelHistoryService) ensureSchema() error {
 			cache_denominator_sum REAL NOT NULL DEFAULT 0,
 			cache_tokens_sum REAL NOT NULL DEFAULT 0,
 			cache_write_sum REAL NOT NULL DEFAULT 0,
+			cache_write_tokens_sum REAL NOT NULL DEFAULT 0,
+			input_tokens_sum REAL NOT NULL DEFAULT 0,
+			output_tokens_sum REAL NOT NULL DEFAULT 0,
 			completion_tokens_sum REAL NOT NULL DEFAULT 0,
 			use_time_sum REAL NOT NULL DEFAULT 0,
 			start_time INTEGER NOT NULL DEFAULT 0,
@@ -139,6 +145,9 @@ func (s *ModelHistoryService) ensureSchema() error {
 			cache_denominator_sum REAL NOT NULL DEFAULT 0,
 			cache_tokens_sum REAL NOT NULL DEFAULT 0,
 			cache_write_sum REAL NOT NULL DEFAULT 0,
+			cache_write_tokens_sum REAL NOT NULL DEFAULT 0,
+			input_tokens_sum REAL NOT NULL DEFAULT 0,
+			output_tokens_sum REAL NOT NULL DEFAULT 0,
 			completion_tokens_sum REAL NOT NULL DEFAULT 0,
 			use_time_sum REAL NOT NULL DEFAULT 0,
 			PRIMARY KEY (date, model_name, slot_idx)
@@ -162,6 +171,9 @@ func (s *ModelHistoryService) ensureSchema() error {
 			cache_denominator_sum REAL NOT NULL DEFAULT 0,
 			cache_tokens_sum REAL NOT NULL DEFAULT 0,
 			cache_write_sum REAL NOT NULL DEFAULT 0,
+			cache_write_tokens_sum REAL NOT NULL DEFAULT 0,
+			input_tokens_sum REAL NOT NULL DEFAULT 0,
+			output_tokens_sum REAL NOT NULL DEFAULT 0,
 			completion_tokens_sum REAL NOT NULL DEFAULT 0,
 			use_time_sum REAL NOT NULL DEFAULT 0,
 			PRIMARY KEY (date, channel_id)
@@ -185,6 +197,9 @@ func (s *ModelHistoryService) ensureSchema() error {
 			cache_denominator_sum REAL NOT NULL DEFAULT 0,
 			cache_tokens_sum REAL NOT NULL DEFAULT 0,
 			cache_write_sum REAL NOT NULL DEFAULT 0,
+			cache_write_tokens_sum REAL NOT NULL DEFAULT 0,
+			input_tokens_sum REAL NOT NULL DEFAULT 0,
+			output_tokens_sum REAL NOT NULL DEFAULT 0,
 			completion_tokens_sum REAL NOT NULL DEFAULT 0,
 			use_time_sum REAL NOT NULL DEFAULT 0,
 			PRIMARY KEY (date, channel_id, slot_idx)
@@ -223,10 +238,13 @@ func (s *ModelHistoryService) ensureSchema() error {
 		{"cache_denominator_sum", "REAL NOT NULL DEFAULT 0"},
 		{"cache_tokens_sum", "REAL NOT NULL DEFAULT 0"},
 		{"cache_write_sum", "REAL NOT NULL DEFAULT 0"},
+		{"cache_write_tokens_sum", "REAL NOT NULL DEFAULT 0"},
+		{"input_tokens_sum", "REAL NOT NULL DEFAULT 0"},
+		{"output_tokens_sum", "REAL NOT NULL DEFAULT 0"},
 		{"completion_tokens_sum", "REAL NOT NULL DEFAULT 0"},
 		{"use_time_sum", "REAL NOT NULL DEFAULT 0"},
 	}
-	for _, table := range []string{"model_hourly_slot", "channel_hourly_slot"} {
+	for _, table := range []string{"model_daily_summary", "model_hourly_slot", "model_daily_channel", "channel_hourly_slot"} {
 		for _, col := range perfColumns {
 			if err := s.ensureColumn(table, col.name, col.definition); err != nil {
 				return err
@@ -331,6 +349,9 @@ type slotCounts struct {
 	cacheDenominatorSum   float64
 	cacheTokensSum        float64
 	cacheWriteSum         float64
+	cacheWriteTokensSum   float64
+	inputTokensSum        float64
+	outputTokensSum       float64
 	completionTokensSum   float64
 	useTimeSum            float64
 }
@@ -355,8 +376,9 @@ func (s *ModelHistoryService) SaveDay(snap *daySnapshot) error {
 		timed_requests, within_5s, within_10s, duration_timed_requests,
 		duration_within_10s, duration_within_20s, output_requests, claude_requests,
 		cache_denominator_sum, cache_tokens_sum, cache_write_sum,
+		cache_write_tokens_sum, input_tokens_sum, output_tokens_sum,
 		completion_tokens_sum, use_time_sum, start_time
-	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -367,6 +389,7 @@ func (s *ModelHistoryService) SaveDay(snap *daySnapshot) error {
 			st.timedRequests, st.within5s, st.within10s, st.durationTimedRequests,
 			st.durationWithin10s, st.durationWithin20s, st.outputRequests, st.claudeRequests,
 			st.cacheDenominatorSum, st.cacheTokensSum, st.cacheWriteSum,
+			st.cacheWriteTokensSum, st.inputTokensSum, st.outputTokensSum,
 			st.completionTokensSum, st.useTimeSum, snap.startTS,
 		); err != nil {
 			return err
@@ -378,8 +401,9 @@ func (s *ModelHistoryService) SaveDay(snap *daySnapshot) error {
 		timed_requests, within_5s, within_10s, duration_timed_requests,
 		duration_within_10s, duration_within_20s, output_requests, claude_requests,
 		cache_denominator_sum, cache_tokens_sum, cache_write_sum,
+		cache_write_tokens_sum, input_tokens_sum, output_tokens_sum,
 		completion_tokens_sum, use_time_sum
-	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -391,6 +415,7 @@ func (s *ModelHistoryService) SaveDay(snap *daySnapshot) error {
 				c.timedRequests, c.within5s, c.within10s, c.durationTimedRequests,
 				c.durationWithin10s, c.durationWithin20s, c.outputRequests, c.claudeRequests,
 				c.cacheDenominatorSum, c.cacheTokensSum, c.cacheWriteSum,
+				c.cacheWriteTokensSum, c.inputTokensSum, c.outputTokensSum,
 				c.completionTokensSum, c.useTimeSum,
 			); err != nil {
 				return err
@@ -403,8 +428,9 @@ func (s *ModelHistoryService) SaveDay(snap *daySnapshot) error {
 		timed_requests, within_5s, within_10s,
 		duration_timed_requests, duration_within_10s, duration_within_20s, output_requests,
 		claude_requests, cache_denominator_sum, cache_tokens_sum, cache_write_sum,
+		cache_write_tokens_sum, input_tokens_sum, output_tokens_sum,
 		completion_tokens_sum, use_time_sum
-	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -415,6 +441,7 @@ func (s *ModelHistoryService) SaveDay(snap *daySnapshot) error {
 			st.timedRequests, st.within5s, st.within10s,
 			st.durationTimedRequests, st.durationWithin10s, st.durationWithin20s, st.outputRequests,
 			st.claudeRequests, st.cacheDenominatorSum, st.cacheTokensSum, st.cacheWriteSum,
+			st.cacheWriteTokensSum, st.inputTokensSum, st.outputTokensSum,
 			st.completionTokensSum, st.useTimeSum,
 		); err != nil {
 			return err
@@ -426,8 +453,9 @@ func (s *ModelHistoryService) SaveDay(snap *daySnapshot) error {
 		timed_requests, within_5s, within_10s, duration_timed_requests,
 		duration_within_10s, duration_within_20s, output_requests, claude_requests,
 		cache_denominator_sum, cache_tokens_sum, cache_write_sum,
+		cache_write_tokens_sum, input_tokens_sum, output_tokens_sum,
 		completion_tokens_sum, use_time_sum
-	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -439,6 +467,7 @@ func (s *ModelHistoryService) SaveDay(snap *daySnapshot) error {
 				c.timedRequests, c.within5s, c.within10s, c.durationTimedRequests,
 				c.durationWithin10s, c.durationWithin20s, c.outputRequests, c.claudeRequests,
 				c.cacheDenominatorSum, c.cacheTokensSum, c.cacheWriteSum,
+				c.cacheWriteTokensSum, c.inputTokensSum, c.outputTokensSum,
 				c.completionTokensSum, c.useTimeSum,
 			); err != nil {
 				return err
@@ -468,6 +497,9 @@ func perfSummaryFromDaily(st *dailyPerfStats) map[string]interface{} {
 		st.cacheDenominatorSum,
 		st.cacheTokensSum,
 		st.cacheWriteSum,
+		st.cacheWriteTokensSum,
+		st.inputTokensSum,
+		st.outputTokensSum,
 		st.completionTokensSum,
 		st.useTimeSum,
 	)
@@ -503,6 +535,7 @@ func (s *ModelHistoryService) getModelSummaryRow(date, modelName string) (*daily
 		timed_requests, within_5s, within_10s, duration_timed_requests,
 		duration_within_10s, duration_within_20s, output_requests, claude_requests,
 		cache_denominator_sum, cache_tokens_sum, cache_write_sum,
+		cache_write_tokens_sum, input_tokens_sum, output_tokens_sum,
 		completion_tokens_sum, use_time_sum, start_time
 		FROM model_daily_summary WHERE date = ? AND model_name = ?`, date, modelName)
 	st := &dailyPerfStats{}
@@ -511,6 +544,7 @@ func (s *ModelHistoryService) getModelSummaryRow(date, modelName string) (*daily
 		&st.timedRequests, &st.within5s, &st.within10s, &st.durationTimedRequests,
 		&st.durationWithin10s, &st.durationWithin20s, &st.outputRequests, &st.claudeRequests,
 		&st.cacheDenominatorSum, &st.cacheTokensSum, &st.cacheWriteSum,
+		&st.cacheWriteTokensSum, &st.inputTokensSum, &st.outputTokensSum,
 		&st.completionTokensSum, &st.useTimeSum, &startTS)
 	if err == sql.ErrNoRows {
 		return nil, 0, false, nil
@@ -527,6 +561,7 @@ func (s *ModelHistoryService) getModelSlots(date, modelName string) (map[int]*sl
 		timed_requests, within_5s, within_10s, duration_timed_requests,
 		duration_within_10s, duration_within_20s, output_requests, claude_requests,
 		cache_denominator_sum, cache_tokens_sum, cache_write_sum,
+		cache_write_tokens_sum, input_tokens_sum, output_tokens_sum,
 		completion_tokens_sum, use_time_sum
 		FROM model_hourly_slot WHERE date = ? AND model_name = ?`, date, modelName)
 	if err != nil {
@@ -542,6 +577,7 @@ func (s *ModelHistoryService) getModelSlots(date, modelName string) (map[int]*sl
 			&c.timedRequests, &c.within5s, &c.within10s, &c.durationTimedRequests,
 			&c.durationWithin10s, &c.durationWithin20s, &c.outputRequests, &c.claudeRequests,
 			&c.cacheDenominatorSum, &c.cacheTokensSum, &c.cacheWriteSum,
+			&c.cacheWriteTokensSum, &c.inputTokensSum, &c.outputTokensSum,
 			&c.completionTokensSum, &c.useTimeSum,
 		); err != nil {
 			return nil, err
@@ -596,6 +632,10 @@ func (s *ModelHistoryService) buildModelStatusFromHistory(date, modelName string
 		"duration_within_20s_rate": perf["duration_within_20s_rate"],
 		"cache_hit_rate":           perf["cache_hit_rate"],
 		"cache_write_rate":         perf["cache_write_rate"],
+		"cache_hit_tokens":         perf["cache_hit_tokens"],
+		"cache_write_tokens":       perf["cache_write_tokens"],
+		"total_input_tokens":       perf["total_input_tokens"],
+		"total_output_tokens":      perf["total_output_tokens"],
 		"completion_tps":           perf["completion_tps"],
 		"timed_requests":           perf["timed_requests"],
 		"duration_timed_requests":  perf["duration_timed_requests"],
@@ -624,6 +664,7 @@ func (s *ModelHistoryService) GetChannelPerformanceByDate(date string) ([]map[st
 	rows, err := s.db.Query(`SELECT channel_id, channel_name, total_requests, success_count, failure_count, empty_count, timed_requests,
 		within_5s, within_10s, duration_timed_requests, duration_within_10s, duration_within_20s,
 		output_requests, claude_requests, cache_denominator_sum, cache_tokens_sum, cache_write_sum,
+		cache_write_tokens_sum, input_tokens_sum, output_tokens_sum,
 		completion_tokens_sum, use_time_sum
 		FROM model_daily_channel WHERE date = ? ORDER BY total_requests DESC`, date)
 	if err != nil {
@@ -644,6 +685,7 @@ func (s *ModelHistoryService) GetChannelPerformanceByDate(date string) ([]map[st
 		if err := rows.Scan(&id, &name, &st.totalRequests, &st.successCount, &st.failureCount, &st.emptyCount, &st.timedRequests,
 			&st.within5s, &st.within10s, &st.durationTimedRequests, &st.durationWithin10s, &st.durationWithin20s,
 			&st.outputRequests, &st.claudeRequests, &st.cacheDenominatorSum, &st.cacheTokensSum, &st.cacheWriteSum,
+			&st.cacheWriteTokensSum, &st.inputTokensSum, &st.outputTokensSum,
 			&st.completionTokensSum, &st.useTimeSum); err != nil {
 			return nil, err
 		}
@@ -679,6 +721,10 @@ func (s *ModelHistoryService) GetChannelPerformanceByDate(date string) ([]map[st
 			"duration_within_20s_rate": perf["duration_within_20s_rate"],
 			"cache_hit_rate":           perf["cache_hit_rate"],
 			"cache_write_rate":         perf["cache_write_rate"],
+			"cache_hit_tokens":         perf["cache_hit_tokens"],
+			"cache_write_tokens":       perf["cache_write_tokens"],
+			"total_input_tokens":       perf["total_input_tokens"],
+			"total_output_tokens":      perf["total_output_tokens"],
 			"completion_tps":           perf["completion_tps"],
 			"timed_requests":           perf["timed_requests"],
 			"duration_timed_requests":  perf["duration_timed_requests"],
@@ -694,6 +740,7 @@ func (s *ModelHistoryService) getChannelSlots(date string, channelID int64) map[
 		timed_requests, within_5s, within_10s, duration_timed_requests,
 		duration_within_10s, duration_within_20s, output_requests, claude_requests,
 		cache_denominator_sum, cache_tokens_sum, cache_write_sum,
+		cache_write_tokens_sum, input_tokens_sum, output_tokens_sum,
 		completion_tokens_sum, use_time_sum
 		FROM channel_hourly_slot WHERE date = ? AND channel_id = ?`, date, channelID)
 	if err != nil {
@@ -710,6 +757,7 @@ func (s *ModelHistoryService) getChannelSlots(date string, channelID int64) map[
 			&c.timedRequests, &c.within5s, &c.within10s, &c.durationTimedRequests,
 			&c.durationWithin10s, &c.durationWithin20s, &c.outputRequests, &c.claudeRequests,
 			&c.cacheDenominatorSum, &c.cacheTokensSum, &c.cacheWriteSum,
+			&c.cacheWriteTokensSum, &c.inputTokensSum, &c.outputTokensSum,
 			&c.completionTokensSum, &c.useTimeSum,
 		); err != nil {
 			return map[int]*slotCounts{}

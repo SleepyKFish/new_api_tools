@@ -45,6 +45,10 @@ interface ModelStatus {
   duration_within_20s_rate: number | null
   cache_hit_rate: number | null
   cache_write_rate: number | null
+  cache_hit_tokens: number
+  cache_write_tokens: number
+  total_input_tokens: number
+  total_output_tokens: number
   completion_tps: number | null
   timed_requests: number
   duration_timed_requests: number
@@ -67,6 +71,10 @@ interface ChannelPerformance {
   duration_within_20s_rate: number | null
   cache_hit_rate: number | null
   cache_write_rate: number | null
+  cache_hit_tokens: number
+  cache_write_tokens: number
+  total_input_tokens: number
+  total_output_tokens: number
   completion_tps: number | null
   timed_requests: number
   duration_timed_requests: number
@@ -390,6 +398,35 @@ function formatCacheWriteRate(value: number | null | undefined): string {
 
 function formatTps(value: number | null): string {
   return value == null ? '--' : value.toFixed(2)
+}
+
+function formatTokenCount(value: number | null | undefined): { compact: string; full: string } {
+  const tokens = Math.max(0, Number(value || 0))
+  const full = tokens.toLocaleString('zh-CN')
+  const units = [
+    { threshold: 1_000_000_000, suffix: 'B' },
+    { threshold: 1_000_000, suffix: 'M' },
+    { threshold: 1_000, suffix: 'K' },
+  ]
+  const unit = units.find(item => tokens >= item.threshold)
+  if (!unit) {
+    return { compact: tokens.toLocaleString('zh-CN'), full }
+  }
+  const scaled = tokens / unit.threshold
+  const digits = scaled >= 100 ? 0 : scaled >= 10 ? 1 : 2
+  return {
+    compact: `${scaled.toFixed(digits).replace(/\.0+$/, '').replace(/(\.\d*[1-9])0+$/, '$1')}${unit.suffix}`,
+    full,
+  }
+}
+
+function formatTokenRatio(value: number | null | undefined, total: number | null | undefined): { compact: string; full: string } {
+  const numerator = formatTokenCount(value)
+  const denominator = formatTokenCount(total)
+  return {
+    compact: `${numerator.compact}/${denominator.compact}`,
+    full: `${numerator.full} / ${denominator.full}`,
+  }
 }
 
 const REFRESH_INTERVALS = [
@@ -1752,53 +1789,49 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                 return (
                   <Card key={channel.channel_id} className={cn("border border-border/60 shadow-none", cardStatusClass)}>
                     <CardContent className="p-3.5">
-                      <div className="flex items-center gap-2">
-                      <div className="text-sm font-medium truncate" title={channel.channel_name}>
-                        {channel.channel_name}
-                      </div>
-                      <Badge
-                        variant={channel.current_status === 'green' ? 'success' : channel.current_status === 'yellow' ? 'warning' : 'destructive'}
-                        className="text-[10px] px-1.5 py-0 h-5 flex-shrink-0"
-                      >
-                        {STATUS_LABELS[channel.current_status]}
-                      </Badge>
-                      <div className="ml-auto text-xs text-muted-foreground flex-shrink-0 tabular-nums">
-                        <span className={cn(
-                          "font-semibold",
-                          channel.current_status === 'green' ? 'text-green-600 dark:text-green-400' :
+                      <div className="flex items-start gap-2">
+                        <div className="text-sm font-medium truncate" title={channel.channel_name}>
+                          {channel.channel_name}
+                        </div>
+                        <Badge
+                          variant={channel.current_status === 'green' ? 'success' : channel.current_status === 'yellow' ? 'warning' : 'destructive'}
+                          className="text-[10px] px-1.5 py-0 h-5 flex-shrink-0"
+                        >
+                          {STATUS_LABELS[channel.current_status]}
+                        </Badge>
+                        <TopMetricStrip
+                          successRate={channel.success_rate}
+                          successClassName={channel.current_status === 'green' ? 'text-green-600 dark:text-green-400' :
                             channel.current_status === 'yellow' ? 'text-yellow-600 dark:text-yellow-400' :
-                              'text-red-600 dark:text-red-400'
-                        )}>{channel.success_rate}%</span>
-                        <span className="mx-1 text-muted-foreground/40">·</span>
-                        <span className="text-red-600 dark:text-red-400" title="失败率">
-                          失 {channel.total_requests > 0 ? (channel.failure_count / channel.total_requests * 100).toFixed(2) : '0.00'}%
-                        </span>
-                        <span className="mx-1 text-muted-foreground/40">·</span>
-                        <span className="text-amber-600 dark:text-amber-400" title="空响应率">
-                          空 {channel.total_requests > 0 ? (channel.empty_count / channel.total_requests * 100).toFixed(2) : '0.00'}%
-                        </span>
-                        <span className="mx-1 text-muted-foreground/40">·</span>
-                        <span title={`渠道 #${channel.channel_id}`}>{channel.total_requests.toLocaleString()}</span>
+                              'text-red-600 dark:text-red-400'}
+                          failureRate={channel.total_requests > 0 ? (channel.failure_count / channel.total_requests * 100).toFixed(2) : '0.00'}
+                          emptyRate={channel.total_requests > 0 ? (channel.empty_count / channel.total_requests * 100).toFixed(2) : '0.00'}
+                          totalRequests={channel.total_requests}
+                          cacheHitTokens={channel.cache_hit_tokens}
+                          cacheWriteTokens={channel.cache_write_tokens}
+                          inputTokens={channel.total_input_tokens}
+                          outputTokens={channel.total_output_tokens}
+                          className="ml-auto mr-2 justify-end text-right"
+                        />
                       </div>
-                    </div>
 
-                    <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-7 gap-2 mt-3">
-                      <MetricPill label="首Token" detail="≤5s占比" value={formatRate(channel.within_5s_rate)} tone="emerald" />
-                      <MetricPill label="首Token" detail="≤10s占比" value={formatRate(channel.within_10s_rate)} tone="blue" />
-                      <MetricPill label="总耗时" detail="≤10s占比" value={formatRate(channel.duration_within_10s_rate)} tone="emerald" />
-                      <MetricPill label="总耗时" detail="≤20s占比" value={formatRate(channel.duration_within_20s_rate)} tone="blue" />
-                      <MetricPill label="缓存" detail="命中率" value={formatPreciseRate(channel.cache_hit_rate)} tone="amber" />
-                      <MetricPill label="缓存" detail="写比例" value={formatCacheWriteRate(channel.cache_write_rate)} tone="amber" />
-                      <MetricPill label="输出速度" detail="tok/s" value={formatTps(channel.completion_tps)} tone="amber" />
-                    </div>
-
-                    {channel.slot_data && channel.slot_data.length > 0 && (
-                      <div className="mt-3">
-                        <StatusSlotBar slots={channel.slot_data} />
+                      <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-7 gap-2 mt-3">
+                        <MetricPill label="首Token" detail="≤5s占比" value={formatRate(channel.within_5s_rate)} tone="emerald" />
+                        <MetricPill label="首Token" detail="≤10s占比" value={formatRate(channel.within_10s_rate)} tone="blue" />
+                        <MetricPill label="总耗时" detail="≤10s占比" value={formatRate(channel.duration_within_10s_rate)} tone="emerald" />
+                        <MetricPill label="总耗时" detail="≤20s占比" value={formatRate(channel.duration_within_20s_rate)} tone="blue" />
+                        <MetricPill label="缓存" detail="命中率" value={formatPreciseRate(channel.cache_hit_rate)} tone="amber" />
+                        <MetricPill label="缓存" detail="写比例" value={formatCacheWriteRate(channel.cache_write_rate)} tone="amber" />
+                        <MetricPill label="输出速度" detail="tok/s" value={formatTps(channel.completion_tps)} tone="amber" />
                       </div>
-                    )}
-                  </CardContent>
-                </Card>
+
+                      {channel.slot_data && channel.slot_data.length > 0 && (
+                        <div className="mt-3">
+                          <StatusSlotBar slots={channel.slot_data} />
+                        </div>
+                      )}
+                    </CardContent>
+                  </Card>
                 )
               })}
             </div>
@@ -2667,6 +2700,56 @@ function MetricPill({
   )
 }
 
+function TopMetricStrip({
+  successRate,
+  successClassName,
+  failureRate,
+  emptyRate,
+  totalRequests,
+  cacheHitTokens,
+  cacheWriteTokens,
+  inputTokens,
+  outputTokens,
+  className,
+}: {
+  successRate: number
+  successClassName: string
+  failureRate: string
+  emptyRate: string
+  totalRequests: number
+  cacheHitTokens: number
+  cacheWriteTokens: number
+  inputTokens: number
+  outputTokens: number
+  className?: string
+}) {
+  const cacheHit = formatTokenRatio(cacheHitTokens, inputTokens)
+  const cacheWrite = formatTokenRatio(cacheWriteTokens, inputTokens)
+  const input = formatTokenCount(inputTokens)
+  const output = formatTokenCount(outputTokens)
+  const items = [
+    { title: '成功率', content: <span className={cn("font-semibold", successClassName)}>{successRate}%</span> },
+    { title: '失败率', content: <><span className="text-muted-foreground/70">失 </span><span className="text-red-600 dark:text-red-400">{failureRate}%</span></> },
+    { title: '空响应率', content: <><span className="text-muted-foreground/70">空 </span><span className="text-amber-600 dark:text-amber-400">{emptyRate}%</span></> },
+    { title: '请求数', content: <span>{totalRequests.toLocaleString()}</span> },
+    { title: cacheHit.full, content: <><span className="text-muted-foreground/70">命中 </span><span className="font-semibold text-amber-600 dark:text-amber-400">{cacheHit.compact}</span></> },
+    { title: cacheWrite.full, content: <><span className="text-muted-foreground/70">写 </span><span className="font-semibold text-amber-600 dark:text-amber-400">{cacheWrite.compact}</span></> },
+    { title: input.full, content: <><span className="text-muted-foreground/70">输入 </span><span className="font-semibold text-sky-600 dark:text-sky-400">{input.compact}</span></> },
+    { title: output.full, content: <><span className="text-muted-foreground/70">输出 </span><span className="font-semibold text-emerald-600 dark:text-emerald-400">{output.compact}</span></> },
+  ]
+
+  return (
+    <div className={cn("flex items-center whitespace-nowrap text-[11px] text-muted-foreground tabular-nums", className)}>
+      {items.map((item, index) => (
+        <span key={`${item.title}-${index}`} className="inline-flex items-center" title={item.title}>
+          {index > 0 && <span className="mx-1 text-muted-foreground/40">·</span>}
+          {item.content}
+        </span>
+      ))}
+    </div>
+  )
+}
+
 function StatusSlotBar({
   slots,
 }: {
@@ -2827,7 +2910,7 @@ function ModelStatusCard({ model, isDraggable }: ModelStatusCardProps) {
     )}>
       <div className="px-4 pt-3 pb-3">
         {/* Header row: logo + name + badge + stats */}
-        <div className="flex items-center gap-2 mb-2.5" title={isDraggable ? '拖拽卡片排序' : undefined}>
+        <div className="flex items-start gap-2 mb-2.5" title={isDraggable ? '拖拽卡片排序' : undefined}>
           <div className="flex items-center justify-center w-6 h-6 rounded-md bg-muted/50 flex-shrink-0">
             <ModelLogo modelName={model.model_name} size={16} />
           </div>
@@ -2840,15 +2923,18 @@ function ModelStatusCard({ model, isDraggable }: ModelStatusCardProps) {
           >
             {STATUS_LABELS[model.current_status]}
           </Badge>
-          <div className="ml-auto text-xs text-muted-foreground flex-shrink-0 tabular-nums">
-            <span className={cn("font-semibold", rateColorClass)}>{model.success_rate}%</span>
-            <span className="mx-1 text-muted-foreground/40">·</span>
-            <span className="text-red-600 dark:text-red-400" title="失败率">失 {failureRate}%</span>
-            <span className="mx-1 text-muted-foreground/40">·</span>
-            <span className="text-amber-600 dark:text-amber-400" title="空响应率">空 {emptyRate}%</span>
-            <span className="mx-1 text-muted-foreground/40">·</span>
-            <span>{model.total_requests.toLocaleString()}</span>
-          </div>
+          <TopMetricStrip
+            successRate={model.success_rate}
+            successClassName={rateColorClass}
+            failureRate={failureRate}
+            emptyRate={emptyRate}
+            totalRequests={model.total_requests}
+            cacheHitTokens={model.cache_hit_tokens}
+            cacheWriteTokens={model.cache_write_tokens}
+            inputTokens={model.total_input_tokens}
+            outputTokens={model.total_output_tokens}
+            className="ml-auto mr-2 justify-end text-right"
+          />
         </div>
 
         <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-7 gap-2 mb-3">

@@ -70,6 +70,9 @@ func TestModelHistoryRoundTrip(t *testing.T) {
 					outputRequests:      4,
 					cacheDenominatorSum: 100,
 					cacheTokensSum:      40,
+					cacheWriteTokensSum: 10,
+					inputTokensSum:      120,
+					outputTokensSum:     200,
 					completionTokensSum: 200,
 					useTimeSum:          100,
 				},
@@ -105,6 +108,9 @@ func TestModelHistoryRoundTrip(t *testing.T) {
 					cacheDenominatorSum:   100,
 					cacheTokensSum:        25,
 					cacheWriteSum:         10,
+					cacheWriteTokensSum:   10,
+					inputTokensSum:        100,
+					outputTokensSum:       150,
 					completionTokensSum:   150,
 					useTimeSum:            50,
 				},
@@ -168,6 +174,9 @@ func TestModelHistoryRoundTrip(t *testing.T) {
 	if slotData[0]["cache_hit_rate"] != 40.0 || slotData[0]["completion_tps"] != 2.0 {
 		t.Fatalf("slot0 performance wrong: %v", slotData[0])
 	}
+	if slotData[0]["cache_hit_tokens"].(int64) != 40 || slotData[0]["cache_write_tokens"].(int64) != 10 || slotData[0]["total_input_tokens"].(int64) != 120 || slotData[0]["total_output_tokens"].(int64) != 200 {
+		t.Fatalf("slot0 token counts wrong: %v", slotData[0])
+	}
 	// ghost model -> zero filled
 	ghost := statuses[1]
 	if ghost["total_requests"].(int64) != 0 {
@@ -203,6 +212,9 @@ func TestModelHistoryRoundTrip(t *testing.T) {
 	}
 	if channelSlotData[0]["cache_hit_rate"] != 25.0 || channelSlotData[0]["cache_write_rate"] != 10.0 || channelSlotData[0]["completion_tps"] != 3.0 {
 		t.Fatalf("channel slot0 performance wrong: %v", channelSlotData[0])
+	}
+	if channelSlotData[0]["cache_hit_tokens"].(int64) != 25 || channelSlotData[0]["cache_write_tokens"].(int64) != 10 || channelSlotData[0]["total_input_tokens"].(int64) != 100 || channelSlotData[0]["total_output_tokens"].(int64) != 150 {
+		t.Fatalf("channel slot0 token counts wrong: %v", channelSlotData[0])
 	}
 	if channelSlotData[13]["total_requests"].(int64) != 5 || channelSlotData[13]["empty_count"].(int64) != 1 {
 		t.Fatalf("channel slot13 wrong: %v", channelSlotData[13])
