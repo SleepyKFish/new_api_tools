@@ -2738,9 +2738,9 @@ function TopStackedStats({
   ]
 
   return (
-    <div className="ml-auto flex flex-col items-end gap-0 text-xs text-muted-foreground flex-shrink-0 tabular-nums">
-      <InlineStatRow items={mainItems} className="leading-5" />
-      <InlineStatRow items={tokenItems} className="text-[10px] leading-3 opacity-90" separatorClassName="mx-0.5" />
+    <div className="ml-auto flex flex-col items-end gap-1 text-xs text-muted-foreground flex-shrink-0 tabular-nums">
+      <InlineStatRow items={mainItems} />
+      <InlineStatRow items={tokenItems} className="text-[11px]" />
     </div>
   )
 }
@@ -2748,17 +2748,15 @@ function TopStackedStats({
 function InlineStatRow({
   items,
   className,
-  separatorClassName,
 }: {
   items: Array<{ title: string; content: React.ReactNode }>
   className?: string
-  separatorClassName?: string
 }) {
   return (
     <div className={cn("flex flex-wrap justify-end gap-x-0 gap-y-0.5 leading-tight", className)}>
       {items.map((item, index) => (
         <span key={`${item.title}-${index}`} className="inline-flex items-center" title={item.title}>
-          {index > 0 && <span className={cn("mx-1 text-muted-foreground/40", separatorClassName)}>·</span>}
+          {index > 0 && <span className="mx-1 text-muted-foreground/40">·</span>}
           {item.content}
         </span>
       ))}
