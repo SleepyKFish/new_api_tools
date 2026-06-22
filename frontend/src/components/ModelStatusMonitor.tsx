@@ -1789,8 +1789,8 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                 return (
                   <Card key={channel.channel_id} className={cn("border border-border/60 shadow-none", cardStatusClass)}>
                     <CardContent className="p-3.5">
-                      <div className="flex items-start gap-2">
-                        <div className="text-sm font-medium truncate" title={channel.channel_name}>
+                      <div className="flex items-center gap-2">
+                        <div className="text-sm font-medium leading-5 truncate" title={channel.channel_name}>
                           {channel.channel_name}
                         </div>
                         <Badge
@@ -2738,9 +2738,9 @@ function TopStackedStats({
   ]
 
   return (
-    <div className="ml-auto flex flex-col items-end gap-1 text-xs text-muted-foreground flex-shrink-0 tabular-nums">
-      <InlineStatRow items={mainItems} />
-      <InlineStatRow items={tokenItems} className="text-[11px]" />
+    <div className="ml-auto flex flex-col items-end gap-0 text-xs text-muted-foreground flex-shrink-0 tabular-nums">
+      <InlineStatRow items={mainItems} className="leading-5" />
+      <InlineStatRow items={tokenItems} className="text-[10px] leading-3 opacity-90" separatorClassName="mx-0.5" />
     </div>
   )
 }
@@ -2748,15 +2748,17 @@ function TopStackedStats({
 function InlineStatRow({
   items,
   className,
+  separatorClassName,
 }: {
   items: Array<{ title: string; content: React.ReactNode }>
   className?: string
+  separatorClassName?: string
 }) {
   return (
     <div className={cn("flex flex-wrap justify-end gap-x-0 gap-y-0.5 leading-tight", className)}>
       {items.map((item, index) => (
         <span key={`${item.title}-${index}`} className="inline-flex items-center" title={item.title}>
-          {index > 0 && <span className="mx-1 text-muted-foreground/40">·</span>}
+          {index > 0 && <span className={cn("mx-1 text-muted-foreground/40", separatorClassName)}>·</span>}
           {item.content}
         </span>
       ))}
@@ -2924,11 +2926,11 @@ function ModelStatusCard({ model, isDraggable }: ModelStatusCardProps) {
     )}>
       <div className="px-4 pt-3 pb-3">
         {/* Header row: logo + name + badge + stats */}
-        <div className="flex items-start gap-2 mb-2.5" title={isDraggable ? '拖拽卡片排序' : undefined}>
+        <div className="flex items-center gap-2 mb-2.5" title={isDraggable ? '拖拽卡片排序' : undefined}>
           <div className="flex items-center justify-center w-6 h-6 rounded-md bg-muted/50 flex-shrink-0">
             <ModelLogo modelName={model.model_name} size={16} />
           </div>
-          <span className="text-sm font-medium truncate" title={model.model_name}>
+          <span className="text-sm font-medium leading-5 truncate" title={model.model_name}>
             {model.model_name}
           </span>
           <Badge
