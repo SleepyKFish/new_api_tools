@@ -40,6 +40,9 @@ func RegisterModelStatusRoutes(r *gin.RouterGroup) {
 		g.PUT("/config/sort-mode", SetSortModeConfig)
 		g.PUT("/config/sort", SetSortModeConfig)
 		g.POST("/config/sort", SetSortModeConfig)
+		g.GET("/config/error-rules", GetErrorRulesConfig)
+		g.PUT("/config/error-rules", SetErrorRulesConfig)
+		g.POST("/config/error-rules", SetErrorRulesConfig)
 		g.PUT("/config/custom-order", SetCustomOrderConfig)
 		g.GET("/config/groups", GetCustomGroupsConfig)
 		g.PUT("/config/groups", SetCustomGroupsConfig)
@@ -200,6 +203,7 @@ func GetSelectedModels(c *gin.Context) {
 		"custom_order":     config["custom_order"],
 		"custom_groups":    config["custom_groups"],
 		"site_title":       config["site_title"],
+		"error_rules":      config["error_rules"],
 	})
 }
 
@@ -400,6 +404,29 @@ func SetCustomOrderConfig(c *gin.Context) {
 		"success":      true,
 		"custom_order": req.CustomOrder,
 		"message":      "Custom order updated",
+	})
+}
+
+// GET /config/error-rules
+func GetErrorRulesConfig(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    service.GetErrorRules(),
+	})
+}
+
+// PUT /config/error-rules
+func SetErrorRulesConfig(c *gin.Context) {
+	var req service.ErrorRuleConfig
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResp("INVALID_PARAMS", "Invalid request", err.Error()))
+		return
+	}
+	service.SetErrorRules(req)
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    service.GetErrorRules(),
+		"message": "Error rules updated",
 	})
 }
 

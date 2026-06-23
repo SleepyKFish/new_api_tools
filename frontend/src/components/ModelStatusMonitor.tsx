@@ -9,6 +9,7 @@ import { CSS } from '@dnd-kit/utilities'
 import { Card, CardContent } from './ui/card'
 import { Button } from './ui/button'
 import { Badge } from './ui/badge'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from './ui/dialog'
 import { useClickOutside } from '../hooks/useClickOutside'
 import {
   OpenAI, Gemini, DeepSeek, SiliconCloud, Groq, Ollama, Claude, Mistral,
@@ -107,6 +108,16 @@ interface ChannelPerformance {
   duration_timed_requests: number
   output_requests: number
   slot_data: SlotStatus[]
+}
+
+interface ErrorRuleConfig {
+  rate_limit_status_codes: number[]
+  user_format_status_codes: number[]
+  user_format_min: number
+  user_format_max: number
+  rate_limit_keywords: string[]
+  user_format_keywords: string[]
+  count_rate_limit_as_model_error: boolean
 }
 
 interface ModelStatusMonitorProps {
@@ -421,8 +432,35 @@ function getDisplayStatus(item: { model_current_status?: 'green' | 'yellow' | 'r
   return item.model_current_status ?? item.current_status
 }
 
+function getStatusByRate(rate: number, totalRequests: number): 'green' | 'yellow' | 'red' {
+  if (totalRequests === 0) return 'green'
+  if (rate >= 95) return 'green'
+  if (rate >= 80) return 'yellow'
+  return 'red'
+}
+
+function getSlotAvailabilityRate(slot: SlotStatus): number {
+  return getAvailabilityRate(slot)
+}
+
 function getSlotDisplayStatus(slot: SlotStatus): 'green' | 'yellow' | 'red' {
-  return slot.model_status ?? slot.status
+  return slot.model_status ?? getStatusByRate(getSlotAvailabilityRate(slot), slot.total_requests)
+}
+
+function parseCodeList(value: string): number[] {
+  return value
+    .split(/[\s,]+/)
+    .map(item => item.trim())
+    .filter(Boolean)
+    .map(item => Number.parseInt(item, 10))
+    .filter(item => Number.isFinite(item) && item >= 0)
+}
+
+function parseKeywordList(value: string): string[] {
+  return value
+    .split('\n')
+    .map(item => item.trim())
+    .filter(Boolean)
 }
 
 function ratePercent(count: number | null | undefined, total: number): string {
@@ -554,6 +592,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
   const [showDateDropdown, setShowDateDropdown] = useState(false)
   const dateDropdownRef = useRef<HTMLDivElement>(null)
   const [showEmbedHelp, setShowEmbedHelp] = useState(false)
+  const [showErrorRulesDialog, setShowErrorRulesDialog] = useState(false)
   const [modelSearchQuery, setModelSearchQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
   const [groupFilter, setGroupFilter] = useState(() => {
@@ -565,6 +604,15 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
   const [showGroupManager, setShowGroupManager] = useState(false)
   const [siteTitle, setSiteTitle] = useState('')
   const [showSiteTitleInput, setShowSiteTitleInput] = useState(false)
+  const [errorRules, setErrorRules] = useState<ErrorRuleConfig>({
+    rate_limit_status_codes: [429],
+    user_format_status_codes: [400, 401, 403, 404, 413, 422],
+    user_format_min: 400,
+    user_format_max: 499,
+    rate_limit_keywords: ['rate_limit', 'rate limit', 'too many requests', 'overloaded', 'quota'],
+    user_format_keywords: ['invalid_request', 'invalid request', 'bad request', 'validation', 'unsupported', 'missing'],
+    count_rate_limit_as_model_error: true,
+  })
   const [isFullscreen, setIsFullscreen] = useState(false)
   const modelSelectorRef = useRef<HTMLDivElement>(null)
   const intervalDropdownRef = useRef<HTMLDivElement>(null)
@@ -769,6 +817,9 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
         // Load site title
         if (data.site_title !== undefined) {
           setSiteTitle(data.site_title || '')
+        }
+        if (data.error_rules) {
+          setErrorRules(data.error_rules as ErrorRuleConfig)
         }
         return data.data || []
       }
@@ -1087,6 +1138,20 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
     } catch (error) {
       console.error('Failed to save site title:', error)
     }
+  }, [apiUrl, getAuthHeaders])
+
+  const saveErrorRulesToBackend = useCallback(async (rules: ErrorRuleConfig) => {
+    const response = await fetch(`${apiUrl}/api/model-status/config/error-rules`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(rules),
+    })
+    const data = await response.json()
+    if (!response.ok || !data.success) {
+      throw new Error(data.message || `HTTP ${response.status}`)
+    }
+    setErrorRules(data.data as ErrorRuleConfig)
+    return data.data as ErrorRuleConfig
   }, [apiUrl, getAuthHeaders])
 
   // Select all models in a group
@@ -1745,6 +1810,17 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                 )}
               </Button>
 
+              <Button
+                variant={showErrorRulesDialog ? 'default' : 'ghost'}
+                size="sm"
+                onClick={() => setShowErrorRulesDialog(true)}
+                title="设置错误分类规则"
+                className="h-9"
+              >
+                <ShieldAlert className="h-4 w-4 mr-2" />
+                错误规则
+              </Button>
+
               {/* Site Title Setting */}
               <div className="relative">
                 <Button
@@ -1852,6 +1928,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                           successClassName={status === 'green' ? 'text-green-600 dark:text-green-400' :
                             status === 'yellow' ? 'text-yellow-600 dark:text-yellow-400' :
                               'text-red-600 dark:text-red-400'}
+                          availabilityRate={getAvailabilityRate(channel)}
                           modelFailureCount={nonFormatFailureCount}
                           formatErrorCount={formatErrorCount}
                           rateLimitCount={rateLimitCount}
@@ -2022,6 +2099,20 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
             }
           }}
           onClose={() => setShowGroupManager(false)}
+        />
+      )}
+
+      {showErrorRulesDialog && (
+        <ErrorRulesDialog
+          rules={errorRules}
+          onClose={() => setShowErrorRulesDialog(false)}
+          onSave={async (rules) => {
+            await saveErrorRulesToBackend(rules)
+            setShowErrorRulesDialog(false)
+            showToast('success', '错误分类规则已更新')
+            fetchModelStatuses(true)
+            fetchChannelSummaries(true)
+          }}
         />
       )}
 
@@ -2481,6 +2572,152 @@ function GroupManagerModal({ groups, allModels, onSave, onClose }: GroupManagerM
   )
 }
 
+function ErrorRulesDialog({
+  rules,
+  onClose,
+  onSave,
+}: {
+  rules: ErrorRuleConfig
+  onClose: () => void
+  onSave: (rules: ErrorRuleConfig) => Promise<void>
+}) {
+  const [saving, setSaving] = useState(false)
+  const [userFormatCodes, setUserFormatCodes] = useState(rules.user_format_status_codes.join(', '))
+  const [rateLimitCodes, setRateLimitCodes] = useState(rules.rate_limit_status_codes.join(', '))
+  const [userFormatMin, setUserFormatMin] = useState(rules.user_format_min ? String(rules.user_format_min) : '')
+  const [userFormatMax, setUserFormatMax] = useState(rules.user_format_max ? String(rules.user_format_max) : '')
+  const [userFormatKeywords, setUserFormatKeywords] = useState(rules.user_format_keywords.join('\n'))
+  const [rateLimitKeywords, setRateLimitKeywords] = useState(rules.rate_limit_keywords.join('\n'))
+  const [countRateLimitAsModelError, setCountRateLimitAsModelError] = useState(rules.count_rate_limit_as_model_error)
+
+  const handleSave = async () => {
+    const nextRules: ErrorRuleConfig = {
+      user_format_status_codes: parseCodeList(userFormatCodes),
+      rate_limit_status_codes: parseCodeList(rateLimitCodes),
+      user_format_min: Number.parseInt(userFormatMin, 10) || 0,
+      user_format_max: Number.parseInt(userFormatMax, 10) || 0,
+      user_format_keywords: parseKeywordList(userFormatKeywords),
+      rate_limit_keywords: parseKeywordList(rateLimitKeywords),
+      count_rate_limit_as_model_error: countRateLimitAsModelError,
+    }
+
+    setSaving(true)
+    try {
+      await onSave(nextRules)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={(open) => { if (!open) onClose() }}>
+      <DialogContent className="max-w-3xl">
+        <DialogHeader>
+          <DialogTitle>错误分类规则</DialogTitle>
+          <DialogDescription>
+            配置“格式错误”和“限流”的判断口径。保存后会立即用于模型可用率和卡片统计。
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="grid gap-4 md:grid-cols-2">
+          <div className="space-y-2">
+            <label className="text-sm font-medium">格式错误状态码</label>
+            <input
+              type="text"
+              value={userFormatCodes}
+              onChange={(e) => setUserFormatCodes(e.target.value)}
+              placeholder="400, 401, 403, 404, 413, 422"
+              className="w-full h-9 px-3 text-sm bg-muted/50 border rounded-md focus:outline-none focus:ring-1 focus:ring-primary"
+            />
+            <p className="text-xs text-muted-foreground">用逗号或空格分隔，命中这些状态码会归为格式错误。</p>
+          </div>
+
+          <div className="space-y-2">
+            <label className="text-sm font-medium">限流状态码</label>
+            <input
+              type="text"
+              value={rateLimitCodes}
+              onChange={(e) => setRateLimitCodes(e.target.value)}
+              placeholder="429"
+              className="w-full h-9 px-3 text-sm bg-muted/50 border rounded-md focus:outline-none focus:ring-1 focus:ring-primary"
+            />
+            <p className="text-xs text-muted-foreground">命中这些状态码时优先归为限流，不计入格式错误。</p>
+          </div>
+
+          <div className="space-y-2">
+            <label className="text-sm font-medium">格式错误状态码范围起始</label>
+            <input
+              type="number"
+              min="0"
+              value={userFormatMin}
+              onChange={(e) => setUserFormatMin(e.target.value.replace(/[^\d]/g, ''))}
+              placeholder="400"
+              className="w-full h-9 px-3 text-sm bg-muted/50 border rounded-md focus:outline-none focus:ring-1 focus:ring-primary"
+            />
+          </div>
+
+          <div className="space-y-2">
+            <label className="text-sm font-medium">格式错误状态码范围结束</label>
+            <input
+              type="number"
+              min="0"
+              value={userFormatMax}
+              onChange={(e) => setUserFormatMax(e.target.value.replace(/[^\d]/g, ''))}
+              placeholder="499"
+              className="w-full h-9 px-3 text-sm bg-muted/50 border rounded-md focus:outline-none focus:ring-1 focus:ring-primary"
+            />
+          </div>
+
+          <div className="space-y-2">
+            <label className="text-sm font-medium">格式错误关键词</label>
+            <textarea
+              value={userFormatKeywords}
+              onChange={(e) => setUserFormatKeywords(e.target.value)}
+              placeholder={'invalid_request\nvalidation\nunsupported'}
+              className="min-h-[140px] w-full px-3 py-2 text-sm bg-muted/50 border rounded-md focus:outline-none focus:ring-1 focus:ring-primary resize-y"
+            />
+            <p className="text-xs text-muted-foreground">每行一个关键词，匹配 `error_type / upstream_error_type / error_code`。</p>
+          </div>
+
+          <div className="space-y-2">
+            <label className="text-sm font-medium">限流关键词</label>
+            <textarea
+              value={rateLimitKeywords}
+              onChange={(e) => setRateLimitKeywords(e.target.value)}
+              placeholder={'rate_limit\ntoo many requests\nquota'}
+              className="min-h-[140px] w-full px-3 py-2 text-sm bg-muted/50 border rounded-md focus:outline-none focus:ring-1 focus:ring-primary resize-y"
+            />
+            <p className="text-xs text-muted-foreground">每行一个关键词，限流规则优先级高于格式错误。</p>
+          </div>
+        </div>
+
+        <label className="flex items-start gap-3 rounded-lg border px-3 py-3 text-sm">
+          <input
+            type="checkbox"
+            checked={countRateLimitAsModelError}
+            onChange={(e) => setCountRateLimitAsModelError(e.target.checked)}
+            className="mt-0.5 h-4 w-4 rounded border-border"
+          />
+          <span>
+            <span className="font-medium">限流计入模型错误</span>
+            <span className="mt-1 block text-xs text-muted-foreground">
+              打开时，429/限流会影响可用率；关闭时，限流会从模型可用率分母中排除。
+            </span>
+          </span>
+        </label>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose} disabled={saving}>取消</Button>
+          <Button onClick={handleSave} disabled={saving}>
+            {saving ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+            保存规则
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 interface ModelStatusCardProps {
   model: ModelStatus
   isDraggable?: boolean
@@ -2752,6 +2989,7 @@ function MetricPill({
 function TopStackedStats({
   successCount,
   successClassName,
+  availabilityRate,
   modelFailureCount,
   formatErrorCount,
   rateLimitCount,
@@ -2764,6 +3002,7 @@ function TopStackedStats({
 }: {
   successCount: number
   successClassName: string
+  availabilityRate: number
   modelFailureCount: number
   formatErrorCount: number
   rateLimitCount: number
@@ -2781,6 +3020,7 @@ function TopStackedStats({
   const successRate = totalRequests > 0 ? (successCount / totalRequests * 100).toFixed(1) : '0.0'
   const mainItems = [
     { title: '成功率', content: <><span className={cn("font-semibold", successClassName)}>成功 {successRate}%</span></> },
+    { title: '可用率', content: <><span className={cn("font-semibold", successClassName)}>可用 {availabilityRate.toFixed(1)}%</span></> },
     { title: '请求数', content: <span>{totalRequests.toLocaleString()}</span> },
   ]
   const errorItems = [
@@ -2979,8 +3219,14 @@ function StatusSlotBar({
               <span className="font-medium text-foreground">{hoveredSlot.total_requests}</span>
             </div>
             <div className="flex justify-between gap-4">
-              <span>成功:</span>
-              <span className="font-medium text-green-600">{hoveredSlot.success_count}</span>
+              <span>可用率:</span>
+              <span className={cn(
+                "font-medium",
+                getSlotDisplayStatus(hoveredSlot) === 'green' ? 'text-green-600' :
+                  getSlotDisplayStatus(hoveredSlot) === 'yellow' ? 'text-yellow-600' : 'text-red-600'
+              )}>
+                {getSlotAvailabilityRate(hoveredSlot).toFixed(1)}%
+              </span>
             </div>
             <div className="flex justify-between gap-4">
               <span>成功率:</span>
@@ -3066,6 +3312,7 @@ function ModelStatusCard({ model, isDraggable }: ModelStatusCardProps) {
           <TopStackedStats
             successCount={model.success_count}
             successClassName={rateColorClass}
+            availabilityRate={getAvailabilityRate(model)}
             modelFailureCount={nonFormatFailureCount}
             formatErrorCount={formatErrorCount}
             rateLimitCount={rateLimitCount}

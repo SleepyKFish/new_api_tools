@@ -1562,6 +1562,7 @@ func (s *ModelStatusService) GetConfig() map[string]interface{} {
 		"selected_models":  s.GetSelectedModels(),
 		"custom_groups":    customGroups,
 		"site_title":       s.GetSiteTitle(),
+		"error_rules":      GetErrorRules(),
 	}
 }
 
