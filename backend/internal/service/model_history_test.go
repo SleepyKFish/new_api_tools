@@ -48,6 +48,7 @@ func TestModelHistoryRoundTrip(t *testing.T) {
 				totalRequests:       10,
 				successCount:        8,
 				failureCount:        1,
+				formatError:         1,
 				emptyCount:          1,
 				timedRequests:       8,
 				within5s:            6,
@@ -63,6 +64,7 @@ func TestModelHistoryRoundTrip(t *testing.T) {
 					total:               5,
 					success:             4,
 					failure:             1,
+					formatError:         1,
 					empty:               0,
 					timedRequests:       4,
 					within5s:            3,
@@ -84,6 +86,7 @@ func TestModelHistoryRoundTrip(t *testing.T) {
 				totalRequests:       9,
 				successCount:        7,
 				failureCount:        1,
+				formatError:         1,
 				emptyCount:          1,
 				timedRequests:       9,
 				within5s:            5,
@@ -98,6 +101,7 @@ func TestModelHistoryRoundTrip(t *testing.T) {
 					total:                 4,
 					success:               3,
 					failure:               1,
+					formatError:           1,
 					empty:                 0,
 					timedRequests:         3,
 					within5s:              2,
@@ -160,6 +164,9 @@ func TestModelHistoryRoundTrip(t *testing.T) {
 	if g["success_rate"].(float64) != 80.0 {
 		t.Fatalf("expected success_rate 80, got %v", g["success_rate"])
 	}
+	if g["format_error_count"].(int64) != 1 || g["model_failure_count"].(int64) != 0 {
+		t.Fatalf("gpt-4 classified failure counts wrong: %v", g)
+	}
 	slotData, ok := g["slot_data"].([]map[string]interface{})
 	if !ok || len(slotData) != historySlotCount {
 		t.Fatalf("slot_data len wrong: %d", len(slotData))
@@ -170,6 +177,9 @@ func TestModelHistoryRoundTrip(t *testing.T) {
 	}
 	if slotData[0]["total_requests"].(int64) != 5 {
 		t.Fatalf("slot0 total wrong: %v", slotData[0]["total_requests"])
+	}
+	if slotData[0]["format_error_count"].(int64) != 1 || slotData[0]["model_failure_count"].(int64) != 0 {
+		t.Fatalf("slot0 classified failure counts wrong: %v", slotData[0])
 	}
 	if slotData[0]["cache_hit_rate"] != 40.0 || slotData[0]["completion_tps"] != 2.0 {
 		t.Fatalf("slot0 performance wrong: %v", slotData[0])
@@ -200,6 +210,9 @@ func TestModelHistoryRoundTrip(t *testing.T) {
 	if chans[0]["success_count"].(int64) != 7 || chans[0]["failure_count"].(int64) != 1 || chans[0]["empty_count"].(int64) != 1 {
 		t.Fatalf("channel availability counts wrong: %v", chans[0])
 	}
+	if chans[0]["format_error_count"].(int64) != 1 || chans[0]["model_failure_count"].(int64) != 0 {
+		t.Fatalf("channel classified failure counts wrong: %v", chans[0])
+	}
 	if chans[0]["success_rate"].(float64) != 77.78 {
 		t.Fatalf("channel success_rate wrong: %v", chans[0]["success_rate"])
 	}
@@ -209,6 +222,9 @@ func TestModelHistoryRoundTrip(t *testing.T) {
 	}
 	if channelSlotData[0]["total_requests"].(int64) != 4 || channelSlotData[0]["success_count"].(int64) != 3 || channelSlotData[0]["failure_count"].(int64) != 1 {
 		t.Fatalf("channel slot0 wrong: %v", channelSlotData[0])
+	}
+	if channelSlotData[0]["format_error_count"].(int64) != 1 || channelSlotData[0]["model_failure_count"].(int64) != 0 {
+		t.Fatalf("channel slot0 classified failure counts wrong: %v", channelSlotData[0])
 	}
 	if channelSlotData[0]["cache_hit_rate"] != 25.0 || channelSlotData[0]["cache_write_rate"] != 10.0 || channelSlotData[0]["completion_tps"] != 3.0 {
 		t.Fatalf("channel slot0 performance wrong: %v", channelSlotData[0])

@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from './Toast'
 import { cn } from '../lib/utils'
-import { RefreshCw, Loader2, Timer, ChevronDown, Settings2, Check, Clock, Palette, Moon, Sun, Minimize2, Maximize2, Zap, Terminal, Leaf, Droplets, HelpCircle, Copy, X, Command, LayoutGrid, Bot, MessageSquareQuote, Triangle, Sparkles, CreditCard, GitBranch, Gamepad2, Rocket, Brain, ArrowUpDown, Search, Filter, Layers, Plus, Pencil, Trash2, FolderPlus, Tag, KeyRound, CalendarDays } from 'lucide-react'
+import { RefreshCw, Loader2, Timer, ChevronDown, Settings2, Check, Clock, Palette, Moon, Sun, Minimize2, Maximize2, Zap, Terminal, Leaf, Droplets, HelpCircle, Copy, X, Command, LayoutGrid, Bot, MessageSquareQuote, Triangle, Sparkles, CreditCard, GitBranch, Gamepad2, Rocket, Brain, ArrowUpDown, Search, Filter, Layers, Plus, Pencil, Trash2, FolderPlus, Tag, KeyRound, CalendarDays, ShieldAlert, FileWarning } from 'lucide-react'
 import { DndContext, closestCenter, KeyboardSensor, PointerSensor, useSensor, useSensors, DragEndEvent } from '@dnd-kit/core'
 import { SortableContext, sortableKeyboardCoordinates, rectSortingStrategy, useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
@@ -24,9 +24,18 @@ interface SlotStatus {
   total_requests: number
   success_count: number
   failure_count: number
+  format_error_count?: number
+  rate_limit_count?: number
+  non_format_failure_count?: number
+  model_failure_count?: number
+  model_error_count?: number
+  non_empty_count?: number
   empty_count: number
   success_rate: number
+  model_success_rate?: number
+  model_availability_rate?: number
   status: 'green' | 'yellow' | 'red'
+  model_status?: 'green' | 'yellow' | 'red'
 }
 
 interface ModelStatus {
@@ -36,9 +45,18 @@ interface ModelStatus {
   total_requests: number
   success_count: number
   failure_count: number
+  format_error_count?: number
+  rate_limit_count?: number
+  non_format_failure_count?: number
+  model_failure_count?: number
+  model_error_count?: number
+  non_empty_count?: number
   empty_count: number
   success_rate: number
+  model_success_rate?: number
+  model_availability_rate?: number
   current_status: 'green' | 'yellow' | 'red'
+  model_current_status?: 'green' | 'yellow' | 'red'
   within_5s_rate: number | null
   within_10s_rate: number | null
   duration_within_10s_rate: number | null
@@ -62,9 +80,18 @@ interface ChannelPerformance {
   total_requests: number
   success_count: number
   failure_count: number
+  format_error_count?: number
+  rate_limit_count?: number
+  non_format_failure_count?: number
+  model_failure_count?: number
+  model_error_count?: number
+  non_empty_count?: number
   empty_count: number
   success_rate: number
+  model_success_rate?: number
+  model_availability_rate?: number
   current_status: 'green' | 'yellow' | 'red'
+  model_current_status?: 'green' | 'yellow' | 'red'
   within_5s_rate: number | null
   within_10s_rate: number | null
   duration_within_10s_rate: number | null
@@ -384,6 +411,23 @@ function formatCountdown(seconds: number): string {
 
 function formatRate(value: number | null): string {
   return value == null ? '--' : `${value.toFixed(1)}%`
+}
+
+function getAvailabilityRate(item: { model_availability_rate?: number; model_success_rate?: number; success_rate: number }): number {
+  return item.model_availability_rate ?? item.model_success_rate ?? item.success_rate
+}
+
+function getDisplayStatus(item: { model_current_status?: 'green' | 'yellow' | 'red'; current_status: 'green' | 'yellow' | 'red' }): 'green' | 'yellow' | 'red' {
+  return item.model_current_status ?? item.current_status
+}
+
+function getSlotDisplayStatus(slot: SlotStatus): 'green' | 'yellow' | 'red' {
+  return slot.model_status ?? slot.status
+}
+
+function ratePercent(count: number | null | undefined, total: number): string {
+  if (!total || total <= 0) return '0.00'
+  return ((Number(count || 0) / total) * 100).toFixed(2)
 }
 
 function formatPreciseRate(value: number | null): string {
@@ -971,7 +1015,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
   const statusCounts = useMemo(() => {
     const counts = { green: 0, yellow: 0, red: 0 }
     modelStatuses.forEach(m => {
-      counts[m.current_status]++
+      counts[getDisplayStatus(m)]++
     })
     return counts
   }, [modelStatuses])
@@ -1003,7 +1047,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
   const avgSuccessRate = useMemo(() => {
     const active = modelStatuses.filter(m => m.total_requests > 0)
     if (active.length === 0) return 0
-    return +(active.reduce((sum, m) => sum + m.success_rate, 0) / active.length).toFixed(1)
+    return +(active.reduce((sum, m) => sum + getAvailabilityRate(m), 0) / active.length).toFixed(1)
   }, [modelStatuses])
 
   const activeChannelSummaries = useMemo(
@@ -1060,7 +1104,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
     switch (sortMode) {
       case 'availability':
         // Sort by success rate descending
-        result = [...modelStatuses].sort((a, b) => b.success_rate - a.success_rate)
+        result = [...modelStatuses].sort((a, b) => getAvailabilityRate(b) - getAvailabilityRate(a))
         break
       case 'custom':
         if (customOrder.length === 0) {
@@ -1105,7 +1149,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
 
     // Apply status filter
     if (statusFilter !== 'all') {
-      result = result.filter(m => m.current_status === statusFilter)
+      result = result.filter(m => getDisplayStatus(m) === statusFilter)
     }
 
     return result
@@ -1172,7 +1216,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
     setSortMode('availability')
     saveSortConfigToBackend('availability').then((saved) => {
       if (saved) {
-        showToast('success', '已按成功率排序')
+        showToast('success', '已按可用率排序')
       } else {
         setSortMode(previousSortMode)
       }
@@ -1290,7 +1334,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                       <span className="text-muted-foreground/40">·</span>
                       <span>总请求 <span className="font-semibold text-foreground tabular-nums">{modelStatuses.reduce((sum, m) => sum + m.total_requests, 0).toLocaleString()}</span></span>
                       <span className="text-muted-foreground/40">·</span>
-                      <span>平均成功率 <span className={cn("font-semibold tabular-nums", avgSuccessRate >= 95 ? 'text-green-600' : avgSuccessRate >= 80 ? 'text-yellow-600' : 'text-red-600')}>{avgSuccessRate}%</span></span>
+                      <span>平均可用率 <span className={cn("font-semibold tabular-nums", avgSuccessRate >= 95 ? 'text-green-600' : avgSuccessRate >= 80 ? 'text-yellow-600' : 'text-red-600')}>{avgSuccessRate}%</span></span>
                       <span className="text-muted-foreground/40">·</span>
                       <span className="flex items-center gap-1.5">
                         <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-green-500" /><span className="font-medium text-green-600 tabular-nums">{statusCounts.green}</span></span>
@@ -1670,7 +1714,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                 size="sm"
                 onClick={handleAvailabilitySort}
                 className="h-9"
-                title="按成功率从高到低排序"
+                title="按可用率从高到低排序"
               >
                 <ArrowUpDown className="h-4 w-4 mr-2" />
                 高可用排序
@@ -1780,9 +1824,13 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
 
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
               {activeChannelSummaries.map((channel) => {
-                const cardStatusClass = channel.current_status === 'red'
+                const status = getDisplayStatus(channel)
+                const formatErrorCount = channel.format_error_count ?? 0
+                const rateLimitCount = channel.rate_limit_count ?? 0
+                const nonFormatFailureCount = channel.non_format_failure_count ?? channel.model_failure_count ?? Math.max(0, channel.failure_count - formatErrorCount)
+                const cardStatusClass = status === 'red'
                   ? 'border-l-[3px] border-l-red-500 bg-red-500/[0.03]'
-                  : channel.current_status === 'yellow'
+                  : status === 'yellow'
                     ? 'border-l-[3px] border-l-yellow-500 bg-yellow-500/[0.03]'
                     : ''
 
@@ -1794,17 +1842,19 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                           {channel.channel_name}
                         </div>
                         <Badge
-                          variant={channel.current_status === 'green' ? 'success' : channel.current_status === 'yellow' ? 'warning' : 'destructive'}
+                          variant={status === 'green' ? 'success' : status === 'yellow' ? 'warning' : 'destructive'}
                           className="text-[10px] px-1.5 py-0 h-5 flex-shrink-0"
                         >
-                          {STATUS_LABELS[channel.current_status]}
+                          {STATUS_LABELS[status]}
                         </Badge>
                         <TopStackedStats
-                          successRate={channel.success_rate}
-                          successClassName={channel.current_status === 'green' ? 'text-green-600 dark:text-green-400' :
-                            channel.current_status === 'yellow' ? 'text-yellow-600 dark:text-yellow-400' :
+                          successCount={channel.success_count}
+                          successClassName={status === 'green' ? 'text-green-600 dark:text-green-400' :
+                            status === 'yellow' ? 'text-yellow-600 dark:text-yellow-400' :
                               'text-red-600 dark:text-red-400'}
-                          failureRate={channel.total_requests > 0 ? (channel.failure_count / channel.total_requests * 100).toFixed(2) : '0.00'}
+                          modelFailureCount={nonFormatFailureCount}
+                          formatErrorCount={formatErrorCount}
+                          rateLimitCount={rateLimitCount}
                           emptyRate={channel.total_requests > 0 ? (channel.empty_count / channel.total_requests * 100).toFixed(2) : '0.00'}
                           totalRequests={channel.total_requests}
                           cacheHitTokens={channel.cache_hit_tokens}
@@ -2049,15 +2099,15 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
             <span className="font-medium text-foreground/70">图例</span>
             <div className="flex items-center gap-1.5">
               <span className="w-2.5 h-2.5 rounded-sm bg-green-500" />
-              <span>成功率 ≥ 95%</span>
+              <span>可用率 ≥ 95%</span>
             </div>
             <div className="flex items-center gap-1.5">
               <span className="w-2.5 h-2.5 rounded-sm bg-yellow-500" />
-              <span>成功率 80-95%</span>
+              <span>可用率 80-95%</span>
             </div>
             <div className="flex items-center gap-1.5">
               <span className="w-2.5 h-2.5 rounded-sm bg-red-500" />
-              <span>成功率 &lt; 80%</span>
+              <span>可用率 &lt; 80%</span>
             </div>
             <div className="flex items-center gap-1.5">
               <span className="w-2.5 h-2.5 rounded-sm bg-gray-200 dark:bg-gray-700" />
@@ -2700,9 +2750,11 @@ function MetricPill({
 }
 
 function TopStackedStats({
-  successRate,
+  successCount,
   successClassName,
-  failureRate,
+  modelFailureCount,
+  formatErrorCount,
+  rateLimitCount,
   emptyRate,
   totalRequests,
   cacheHitTokens,
@@ -2710,9 +2762,11 @@ function TopStackedStats({
   inputTokens,
   outputTokens,
 }: {
-  successRate: number
+  successCount: number
   successClassName: string
-  failureRate: string
+  modelFailureCount: number
+  formatErrorCount: number
+  rateLimitCount: number
   emptyRate: string
   totalRequests: number
   cacheHitTokens: number
@@ -2724,11 +2778,42 @@ function TopStackedStats({
   const cacheWrite = formatTokenRatio(cacheWriteTokens, inputTokens)
   const output = formatTokenCount(outputTokens)
   const total = formatTokenCount(inputTokens + outputTokens)
+  const successRate = totalRequests > 0 ? (successCount / totalRequests * 100).toFixed(1) : '0.0'
   const mainItems = [
-    { title: '成功率', content: <span className={cn("font-semibold", successClassName)}>{successRate}%</span> },
-    { title: '失败率', content: <><span className="text-muted-foreground/70">失 </span><span className="text-red-600 dark:text-red-400">{failureRate}%</span></> },
-    { title: '空响应率', content: <><span className="text-muted-foreground/70">空 </span><span className="text-amber-600 dark:text-amber-400">{emptyRate}%</span></> },
+    { title: '成功率', content: <><span className={cn("font-semibold", successClassName)}>成功 {successRate}%</span></> },
     { title: '请求数', content: <span>{totalRequests.toLocaleString()}</span> },
+  ]
+  const errorItems = [
+    {
+      title: `上游服务报错率 = ${modelFailureCount.toLocaleString()} / ${totalRequests.toLocaleString()}`,
+      icon: ShieldAlert,
+      label: '上游服务',
+      count: modelFailureCount,
+      value: `${ratePercent(modelFailureCount, totalRequests)}%`,
+      color: 'text-rose-500',
+    },
+    {
+      title: `用户请求格式报错率 = ${formatErrorCount.toLocaleString()} / ${totalRequests.toLocaleString()}`,
+      icon: FileWarning,
+      label: '格式',
+      count: formatErrorCount,
+      value: `${ratePercent(formatErrorCount, totalRequests)}%`,
+      color: 'text-amber-500',
+    },
+    {
+      title: `限速率 = ${rateLimitCount.toLocaleString()} / ${totalRequests.toLocaleString()}`,
+      icon: Timer,
+      label: '限速',
+      count: rateLimitCount,
+      value: `${ratePercent(rateLimitCount, totalRequests)}%`,
+      color: 'text-sky-500',
+    },
+    {
+      title: `空响应率 = ${emptyRate}%`,
+      count: 1,
+      value: emptyRate,
+      color: 'text-amber-500',
+    },
   ]
   const tokenItems = [
     { title: cacheHit.full, content: <><span className="text-muted-foreground/70">命中 </span><span className="font-semibold text-amber-600 dark:text-amber-400">{cacheHit.compact}</span></> },
@@ -2740,7 +2825,42 @@ function TopStackedStats({
   return (
     <div className="ml-auto flex flex-col items-end gap-1 text-xs text-muted-foreground flex-shrink-0 tabular-nums">
       <InlineStatRow items={mainItems} />
+      <ErrorCategoryRow items={errorItems} />
       <InlineStatRow items={tokenItems} className="text-[11px]" />
+    </div>
+  )
+}
+
+function ErrorCategoryRow({
+  items,
+}: {
+  items: Array<{
+    title: string
+    icon?: IconComponent
+    label?: string
+    count: number
+    value: string
+    color: string
+  }>
+}) {
+  return (
+    <div className="flex flex-wrap justify-end gap-x-0 gap-y-0.5 leading-tight text-[11px]">
+      {items.map((item, index) => {
+        const Icon = item.icon
+        return (
+          <span key={item.title} className="inline-flex items-center">
+            {index > 0 && <span className="mx-1.5 text-muted-foreground/30">·</span>}
+            <span
+              className={cn("inline-flex items-center gap-1", item.count > 0 ? item.color : 'opacity-40')}
+              title={item.title}
+              aria-label={`${item.title}: ${item.value}`}
+            >
+              {Icon && <Icon className="h-3 w-3 flex-shrink-0" strokeWidth={2} />}
+              <span>{item.label ? `${item.label} ${item.count > 0 ? item.value : '0%'}` : `空 ${item.value}%`}</span>
+            </span>
+          </span>
+        )
+      })}
     </div>
   )
 }
@@ -2817,7 +2937,7 @@ function StatusSlotBar({
               index === 0 ? "rounded-l-md rounded-r-sm" :
                 index === slots.length - 1 ? "rounded-r-md rounded-l-sm" :
                   "rounded-sm",
-              slot.total_requests === 0 ? STATUS_COLORS.empty : STATUS_COLORS[slot.status],
+              slot.total_requests === 0 ? STATUS_COLORS.empty : STATUS_COLORS[getSlotDisplayStatus(slot)],
               "animate-in fade-in-0 duration-300"
             )}
             style={{ animationDelay: `${index * 15}ms` }}
@@ -2866,18 +2986,24 @@ function StatusSlotBar({
               <span>成功率:</span>
               <span className={cn(
                 "font-medium",
-                hoveredSlot.status === 'green' ? 'text-green-600' :
-                  hoveredSlot.status === 'yellow' ? 'text-yellow-600' : 'text-red-600'
+                getSlotDisplayStatus(hoveredSlot) === 'green' ? 'text-green-600' :
+                  getSlotDisplayStatus(hoveredSlot) === 'yellow' ? 'text-yellow-600' : 'text-red-600'
               )}>
-                {hoveredSlot.success_rate}%
+                {hoveredSlot.total_requests > 0 ? (hoveredSlot.success_count / hoveredSlot.total_requests * 100).toFixed(1) : '0.0'}%
               </span>
             </div>
             <div className="flex justify-between gap-4">
-              <span>失败率:</span>
-              <span className="font-medium text-red-600">
-                {hoveredSlot.total_requests > 0
-                  ? (hoveredSlot.failure_count / hoveredSlot.total_requests * 100).toFixed(2)
-                  : '0.00'}%
+              <span className="inline-flex items-center gap-1">
+                <ShieldAlert className="h-3 w-3 text-rose-500" strokeWidth={2} />
+                失败率:
+              </span>
+              <span className="font-medium">
+                <span className="text-rose-500">{ratePercent(
+                  (hoveredSlot.non_format_failure_count ?? hoveredSlot.model_failure_count ?? Math.max(0, hoveredSlot.failure_count - (hoveredSlot.format_error_count ?? 0))) + (hoveredSlot.rate_limit_count ?? 0),
+                  hoveredSlot.total_requests
+                )}%</span>
+                <span className="text-muted-foreground/30 mx-0.5">/</span>
+                <span className="text-amber-500">{ratePercent(hoveredSlot.format_error_count ?? 0, hoveredSlot.total_requests)}%</span>
               </span>
             </div>
             <div className="flex justify-between gap-4">
@@ -2896,24 +3022,24 @@ function StatusSlotBar({
 }
 
 function ModelStatusCard({ model, isDraggable }: ModelStatusCardProps) {
+  const status = getDisplayStatus(model)
 
   // Success rate color based on status
-  const rateColorClass = model.current_status === 'green' ? 'text-green-600 dark:text-green-400'
-    : model.current_status === 'yellow' ? 'text-yellow-600 dark:text-yellow-400'
+  const rateColorClass = status === 'green' ? 'text-green-600 dark:text-green-400'
+    : status === 'yellow' ? 'text-yellow-600 dark:text-yellow-400'
       : 'text-red-600 dark:text-red-400'
 
-  // Failure / empty rates derived from counts (backend only returns success_rate)
-  const failureRate = model.total_requests > 0
-    ? (model.failure_count / model.total_requests * 100).toFixed(2)
-    : '0.00'
+  const formatErrorCount = model.format_error_count ?? 0
+  const rateLimitCount = model.rate_limit_count ?? 0
+  const nonFormatFailureCount = model.non_format_failure_count ?? model.model_failure_count ?? Math.max(0, model.failure_count - formatErrorCount)
   const emptyRate = model.total_requests > 0
     ? (model.empty_count / model.total_requests * 100).toFixed(2)
     : '0.00'
 
   // Card border/bg classes based on status
-  const cardStatusClass = model.current_status === 'red'
+  const cardStatusClass = status === 'red'
     ? 'border-l-[3px] border-l-red-500 bg-red-500/[0.03]'
-    : model.current_status === 'yellow'
+    : status === 'yellow'
       ? 'border-l-[3px] border-l-yellow-500 bg-yellow-500/[0.03]'
       : ''
 
@@ -2932,15 +3058,17 @@ function ModelStatusCard({ model, isDraggable }: ModelStatusCardProps) {
             {model.model_name}
           </span>
           <Badge
-            variant={model.current_status === 'green' ? 'success' : model.current_status === 'yellow' ? 'warning' : 'destructive'}
+            variant={status === 'green' ? 'success' : status === 'yellow' ? 'warning' : 'destructive'}
             className="text-[10px] px-1.5 py-0 h-5 flex-shrink-0"
           >
-            {STATUS_LABELS[model.current_status]}
+            {STATUS_LABELS[status]}
           </Badge>
           <TopStackedStats
-            successRate={model.success_rate}
+            successCount={model.success_count}
             successClassName={rateColorClass}
-            failureRate={failureRate}
+            modelFailureCount={nonFormatFailureCount}
+            formatErrorCount={formatErrorCount}
+            rateLimitCount={rateLimitCount}
             emptyRate={emptyRate}
             totalRequests={model.total_requests}
             cacheHitTokens={model.cache_hit_tokens}

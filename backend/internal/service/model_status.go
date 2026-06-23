@@ -273,6 +273,103 @@ func (s *ModelStatusService) jsonTextExpr(jsonExpr, key string) string {
 	END`, jsonExpr, jsonExpr, jsonExpr, jsonExpr, key)
 }
 
+func (s *ModelStatusService) errorStatusCodeExpr(otherCol string) string {
+	if !s.db.ColumnExists("logs", "other") {
+		return "0"
+	}
+
+	keys := []string{"status_code", "upstream_error_status", "upstream_status_code", "code"}
+	if s.db.IsPG {
+		parts := make([]string, 0, len(keys))
+		for _, key := range keys {
+			textExpr := s.jsonTextExpr(otherCol, key)
+			parts = append(parts, fmt.Sprintf(`CASE
+				WHEN (%s) ~ '^[0-9]+$' THEN CAST((%s) AS INTEGER)
+				ELSE 0
+			END`, textExpr, textExpr))
+		}
+		return fmt.Sprintf("GREATEST(%s)", strings.Join(parts, ", "))
+	}
+
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, fmt.Sprintf("COALESCE((%s), 0)", s.jsonNumberExpr(otherCol, key)))
+	}
+	return fmt.Sprintf("GREATEST(%s)", strings.Join(parts, ", "))
+}
+
+func intListSQL(values []int) string {
+	if len(values) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		parts = append(parts, strconv.Itoa(value))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func (s *ModelStatusService) errorKeywordCondition(otherCol string, keywords []string) string {
+	if !s.db.ColumnExists("logs", "other") || len(keywords) == 0 {
+		return "FALSE"
+	}
+
+	blob := fmt.Sprintf("LOWER(CONCAT_WS(' ', COALESCE(%s, ''), COALESCE(%s, ''), COALESCE(%s, ''), COALESCE(%s, '')))",
+		s.jsonTextExpr(otherCol, "error_type"),
+		s.jsonTextExpr(otherCol, "upstream_error_type"),
+		s.jsonTextExpr(otherCol, "error_code"),
+		s.jsonTextExpr(otherCol, "upstream_error_code"))
+	if s.db.IsPG {
+		blob = fmt.Sprintf("LOWER(CONCAT_WS(' ', COALESCE(%s, ''), COALESCE(%s, ''), COALESCE(%s, ''), COALESCE(%s, '')))",
+			s.jsonTextExpr(otherCol, "error_type"),
+			s.jsonTextExpr(otherCol, "upstream_error_type"),
+			s.jsonTextExpr(otherCol, "error_code"),
+			s.jsonTextExpr(otherCol, "upstream_error_code"))
+	}
+
+	conditions := make([]string, 0, len(keywords))
+	for _, kw := range keywords {
+		kw = strings.TrimSpace(strings.ToLower(kw))
+		if kw == "" {
+			continue
+		}
+		conditions = append(conditions, fmt.Sprintf("%s LIKE '%%%s%%'", blob, strings.ReplaceAll(kw, "'", "''")))
+	}
+	if len(conditions) == 0 {
+		return "FALSE"
+	}
+	return "(" + strings.Join(conditions, " OR ") + ")"
+}
+
+func (s *ModelStatusService) rateLimitErrorSQLCondition(otherCol string, rules ErrorRuleConfig) string {
+	if !s.db.ColumnExists("logs", "other") {
+		return "FALSE"
+	}
+	statusCode := s.errorStatusCodeExpr(otherCol)
+	conditions := []string{}
+	if codes := intListSQL(rules.RateLimitStatusCodes); codes != "" {
+		conditions = append(conditions, fmt.Sprintf("(%s) IN (%s)", statusCode, codes))
+	}
+	conditions = append(conditions, s.errorKeywordCondition(otherCol, rules.RateLimitKeywords))
+	return "(" + strings.Join(conditions, " OR ") + ")"
+}
+
+func (s *ModelStatusService) userFormatErrorSQLCondition(otherCol string, rules ErrorRuleConfig) string {
+	if !s.db.ColumnExists("logs", "other") {
+		return "FALSE"
+	}
+	statusCode := s.errorStatusCodeExpr(otherCol)
+	conditions := []string{}
+	if codes := intListSQL(rules.UserFormatStatusCodes); codes != "" {
+		conditions = append(conditions, fmt.Sprintf("(%s) IN (%s)", statusCode, codes))
+	}
+	if rules.UserFormatMin > 0 && rules.UserFormatMax >= rules.UserFormatMin {
+		conditions = append(conditions, fmt.Sprintf("((%s) >= %d AND (%s) <= %d)", statusCode, rules.UserFormatMin, statusCode, rules.UserFormatMax))
+	}
+	conditions = append(conditions, s.errorKeywordCondition(otherCol, rules.UserFormatKeywords))
+	return fmt.Sprintf("((%s) AND NOT %s)", strings.Join(conditions, " OR "), s.rateLimitErrorSQLCondition(otherCol, rules))
+}
+
 func (s *ModelStatusService) requestPathExpr(otherCol string) string {
 	keys := []string{
 		"请求路径",
@@ -628,6 +725,8 @@ type availabilityStats struct {
 	totalRequests int64
 	successCount  int64
 	failureCount  int64
+	formatError   int64
+	rateLimit     int64
 	emptyCount    int64
 	slots         map[int]*slotCounts
 }
@@ -636,7 +735,7 @@ func newAvailabilityStats() *availabilityStats {
 	return &availabilityStats{slots: make(map[int]*slotCounts)}
 }
 
-func (s *availabilityStats) accumulate(row map[string]interface{}, startTime int64, slotSeconds int64, numSlots int) {
+func (s *availabilityStats) accumulate(row map[string]interface{}, startTime int64, slotSeconds int64, numSlots int, rules ErrorRuleConfig) {
 	if s == nil {
 		return
 	}
@@ -671,6 +770,15 @@ func (s *availabilityStats) accumulate(row map[string]interface{}, startTime int
 	case logType == 5:
 		s.failureCount++
 		counts.failure++
+		bucket := rules.classifyOtherJSON(parseOtherJSON(row["other"]))
+		switch bucket {
+		case ErrorBucketUserFormat:
+			s.formatError++
+			counts.formatError++
+		case ErrorBucketRateLimit:
+			s.rateLimit++
+			counts.rateLimit++
+		}
 	case logType == 2 && completion == 0:
 		s.emptyCount++
 		counts.empty++
@@ -682,13 +790,15 @@ func (s *availabilityStats) accumulate(row map[string]interface{}, startTime int
 
 func buildAvailabilitySlotData(slots map[int]*slotCounts, startTime int64, slotSeconds int64, numSlots int) []map[string]interface{} {
 	slotData := make([]map[string]interface{}, 0, numSlots)
+	rules := GetErrorRules()
 	for i := 0; i < numSlots; i++ {
 		slotStart := startTime + int64(i)*slotSeconds
 		slotEnd := slotStart + slotSeconds
 		c := slots[i]
-		var total, success, failure, empty int64
+		var total, success, failure, empty, formatError, rateLimit int64
 		if c != nil {
 			total, success, failure, empty = c.total, c.success, c.failure, c.empty
+			formatError, rateLimit = c.formatError, c.rateLimit
 		} else {
 			c = &slotCounts{}
 		}
@@ -697,6 +807,8 @@ func buildAvailabilitySlotData(slots map[int]*slotCounts, startTime int64, slotS
 		if total > 0 {
 			slotRate = float64(success) / float64(total) * 100
 		}
+		modelRate := modelSuccessRate(success, total, formatError, rateLimit, rules)
+		statusDenom := modelAvailabilityDenominator(total, formatError, rateLimit, rules)
 		perf := buildPerformanceSummary(
 			success,
 			c.timedRequests,
@@ -724,9 +836,18 @@ func buildAvailabilitySlotData(slots map[int]*slotCounts, startTime int64, slotS
 			"total_requests":           total,
 			"success_count":            success,
 			"failure_count":            failure,
+			"format_error_count":       formatError,
+			"rate_limit_count":         rateLimit,
+			"non_format_failure_count": nonFormatFailureCount(failure, formatError),
+			"model_failure_count":      nonFormatFailureCount(failure, formatError),
+			"model_error_count":        nonFormatFailureCount(failure, formatError) + empty,
+			"non_empty_count":          success,
 			"empty_count":              empty,
 			"success_rate":             roundRate(slotRate),
+			"model_success_rate":       roundRate(modelRate),
+			"model_availability_rate":  roundRate(modelRate),
 			"status":                   getStatusColor(slotRate, total),
+			"model_status":             getStatusColor(modelRate, statusDenom),
 			"within_5s_rate":           perf["within_5s_rate"],
 			"within_10s_rate":          perf["within_10s_rate"],
 			"duration_within_10s_rate": perf["duration_within_10s_rate"],
@@ -894,7 +1015,7 @@ func (s *ModelStatusService) getModelPerformanceMap(modelNames []string, startTi
 }
 
 func (s *ModelStatusService) GetChannelPerformanceSummaries(window string) ([]map[string]interface{}, error) {
-	cacheKey := fmt.Sprintf("model_status:channel_performance:%s", window)
+	cacheKey := fmt.Sprintf("model_status:channel_performance:v2:%s", window)
 	cm := cache.Get()
 	var cached []map[string]interface{}
 	found, _ := cm.GetJSON(cacheKey, &cached)
@@ -912,6 +1033,7 @@ func (s *ModelStatusService) GetChannelPerformanceSummaries(window string) ([]ma
 	numSlots := twConfig.numSlots
 	slotSeconds := twConfig.slotSeconds
 
+	rules := GetErrorRules()
 	statsByChannel := make(map[int64]*performanceStats)
 	availabilityByChannel := make(map[int64]*availabilityStats)
 	cursorCreatedAt := startTime - 1
@@ -931,7 +1053,7 @@ func (s *ModelStatusService) GetChannelPerformanceSummaries(window string) ([]ma
 				availability = newAvailabilityStats()
 				availabilityByChannel[channelID] = availability
 			}
-			availability.accumulate(row, startTime, slotSeconds, numSlots)
+			availability.accumulate(row, startTime, slotSeconds, numSlots, rules)
 
 			stats := statsByChannel[channelID]
 			if stats == nil {
@@ -984,6 +1106,8 @@ func (s *ModelStatusService) GetChannelPerformanceSummaries(window string) ([]ma
 		if availability.totalRequests > 0 {
 			successRate = float64(availability.successCount) / float64(availability.totalRequests) * 100
 		}
+		modelRate := modelSuccessRate(availability.successCount, availability.totalRequests, availability.formatError, availability.rateLimit, rules)
+		modelStatus := getStatusColor(modelRate, modelAvailabilityDenominator(availability.totalRequests, availability.formatError, availability.rateLimit, rules))
 		channelName := channelNames[item.id]
 		if channelName == "" {
 			channelName = fmt.Sprintf("Channel#%d", item.id)
@@ -994,9 +1118,18 @@ func (s *ModelStatusService) GetChannelPerformanceSummaries(window string) ([]ma
 			"total_requests":           availability.totalRequests,
 			"success_count":            availability.successCount,
 			"failure_count":            availability.failureCount,
+			"format_error_count":       availability.formatError,
+			"rate_limit_count":         availability.rateLimit,
+			"non_format_failure_count": nonFormatFailureCount(availability.failureCount, availability.formatError),
+			"model_failure_count":      nonFormatFailureCount(availability.failureCount, availability.formatError),
+			"model_error_count":        nonFormatFailureCount(availability.failureCount, availability.formatError) + availability.emptyCount,
+			"non_empty_count":          availability.successCount,
 			"empty_count":              availability.emptyCount,
 			"success_rate":             roundRate(successRate),
+			"model_success_rate":       roundRate(modelRate),
+			"model_availability_rate":  roundRate(modelRate),
 			"current_status":           getStatusColor(successRate, availability.totalRequests),
+			"model_current_status":     modelStatus,
 			"within_5s_rate":           perf["within_5s_rate"],
 			"within_10s_rate":          perf["within_10s_rate"],
 			"duration_within_10s_rate": perf["duration_within_10s_rate"],
@@ -1049,7 +1182,7 @@ func (s *ModelStatusService) GetAvailableModels() ([]map[string]interface{}, err
 // GetModelStatus returns status for a specific model
 // Uses a single GROUP BY FLOOR query (matches Python backend optimization)
 func (s *ModelStatusService) GetModelStatus(modelName, window string) (map[string]interface{}, error) {
-	cacheKey := fmt.Sprintf("model_status:%s:%s", modelName, window)
+	cacheKey := fmt.Sprintf("model_status:v2:%s:%s", modelName, window)
 	cm := cache.Get()
 	var cached map[string]interface{}
 	found, _ := cm.GetJSON(cacheKey, &cached)
@@ -1067,6 +1200,7 @@ func (s *ModelStatusService) GetModelStatus(modelName, window string) (map[strin
 	startTime := now - twConfig.totalSeconds
 	numSlots := twConfig.numSlots
 	slotSeconds := twConfig.slotSeconds
+	rules := GetErrorRules()
 
 	// Single optimized query — aggregate by time slot using FLOOR division
 	// This reduces N queries to 1 query per model (matches Python backend)
@@ -1081,13 +1215,17 @@ func (s *ModelStatusService) GetModelStatus(modelName, window string) (map[strin
 			COUNT(*) as total,
 			SUM(CASE WHEN type = 2 AND completion_tokens > 0 THEN 1 ELSE 0 END) as success,
 			SUM(CASE WHEN type = 5 THEN 1 ELSE 0 END) as failure,
-			SUM(CASE WHEN type = 2 AND completion_tokens = 0 THEN 1 ELSE 0 END) as empty
+			SUM(CASE WHEN type = 2 AND completion_tokens = 0 THEN 1 ELSE 0 END) as empty,
+			SUM(CASE WHEN type = 5 AND %s THEN 1 ELSE 0 END) as format_error,
+			SUM(CASE WHEN type = 5 AND %s THEN 1 ELSE 0 END) as rate_limit
 		FROM logs
 		WHERE model_name = ?
 			AND created_at >= ? AND created_at < ?
 			AND type IN (2, 5)
 		GROUP BY FLOOR((created_at - %d) / %d)`,
 		startTime, slotSeconds,
+		s.userFormatErrorSQLCondition("other", rules),
+		s.rateLimitErrorSQLCondition("other", rules),
 		startTime, slotSeconds))
 
 	rows, _ := s.db.Query(slotQuery, modelName, startTime, now)
@@ -1097,6 +1235,8 @@ func (s *ModelStatusService) GetModelStatus(modelName, window string) (map[strin
 		total   int64
 		success int64
 		failure int64
+		format  int64
+		rateLim int64
 		empty   int64
 	}
 	slotMap := make(map[int64]*slotInfo, numSlots)
@@ -1110,6 +1250,8 @@ func (s *ModelStatusService) GetModelStatus(modelName, window string) (map[strin
 					total:   toInt64(row["total"]),
 					success: toInt64(row["success"]),
 					failure: toInt64(row["failure"]),
+					format:  toInt64(row["format_error"]),
+					rateLim: toInt64(row["rate_limit"]),
 					empty:   toInt64(row["empty"]),
 				}
 			}
@@ -1121,6 +1263,8 @@ func (s *ModelStatusService) GetModelStatus(modelName, window string) (map[strin
 	totalReqs := int64(0)
 	totalSuccess := int64(0)
 	totalFailure := int64(0)
+	totalFormatError := int64(0)
+	totalRateLimit := int64(0)
 	totalEmpty := int64(0)
 
 	for i := 0; i < numSlots; i++ {
@@ -1131,11 +1275,15 @@ func (s *ModelStatusService) GetModelStatus(modelName, window string) (map[strin
 		slotTotal := int64(0)
 		slotSuccess := int64(0)
 		slotFailure := int64(0)
+		slotFormatError := int64(0)
+		slotRateLimit := int64(0)
 		slotEmpty := int64(0)
 		if si != nil {
 			slotTotal = si.total
 			slotSuccess = si.success
 			slotFailure = si.failure
+			slotFormatError = si.format
+			slotRateLimit = si.rateLim
 			slotEmpty = si.empty
 		}
 
@@ -1143,22 +1291,35 @@ func (s *ModelStatusService) GetModelStatus(modelName, window string) (map[strin
 		if slotTotal > 0 {
 			slotRate = float64(slotSuccess) / float64(slotTotal) * 100
 		}
+		slotModelRate := modelSuccessRate(slotSuccess, slotTotal, slotFormatError, slotRateLimit, rules)
+		slotStatusDenom := modelAvailabilityDenominator(slotTotal, slotFormatError, slotRateLimit, rules)
 
 		slotData = append(slotData, map[string]interface{}{
-			"slot":           i,
-			"start_time":     slotStart,
-			"end_time":       slotEnd,
-			"total_requests": slotTotal,
-			"success_count":  slotSuccess,
-			"failure_count":  slotFailure,
-			"empty_count":    slotEmpty,
-			"success_rate":   roundRate(slotRate),
-			"status":         getStatusColor(slotRate, slotTotal),
+			"slot":                     i,
+			"start_time":               slotStart,
+			"end_time":                 slotEnd,
+			"total_requests":           slotTotal,
+			"success_count":            slotSuccess,
+			"failure_count":            slotFailure,
+			"format_error_count":       slotFormatError,
+			"rate_limit_count":         slotRateLimit,
+			"non_format_failure_count": nonFormatFailureCount(slotFailure, slotFormatError),
+			"model_failure_count":      nonFormatFailureCount(slotFailure, slotFormatError),
+			"model_error_count":        nonFormatFailureCount(slotFailure, slotFormatError) + slotEmpty,
+			"non_empty_count":          slotSuccess,
+			"empty_count":              slotEmpty,
+			"success_rate":             roundRate(slotRate),
+			"model_success_rate":       roundRate(slotModelRate),
+			"model_availability_rate":  roundRate(slotModelRate),
+			"status":                   getStatusColor(slotRate, slotTotal),
+			"model_status":             getStatusColor(slotModelRate, slotStatusDenom),
 		})
 
 		totalReqs += slotTotal
 		totalSuccess += slotSuccess
 		totalFailure += slotFailure
+		totalFormatError += slotFormatError
+		totalRateLimit += slotRateLimit
 		totalEmpty += slotEmpty
 	}
 
@@ -1166,6 +1327,8 @@ func (s *ModelStatusService) GetModelStatus(modelName, window string) (map[strin
 	if totalReqs > 0 {
 		overallRate = float64(totalSuccess) / float64(totalReqs) * 100
 	}
+	modelRate := modelSuccessRate(totalSuccess, totalReqs, totalFormatError, totalRateLimit, rules)
+	modelStatus := getStatusColor(modelRate, modelAvailabilityDenominator(totalReqs, totalFormatError, totalRateLimit, rules))
 
 	perf := s.getModelPerformanceMap([]string{modelName}, startTime, now)[modelName]
 
@@ -1176,9 +1339,18 @@ func (s *ModelStatusService) GetModelStatus(modelName, window string) (map[strin
 		"total_requests":           totalReqs,
 		"success_count":            totalSuccess,
 		"failure_count":            totalFailure,
+		"format_error_count":       totalFormatError,
+		"rate_limit_count":         totalRateLimit,
+		"non_format_failure_count": nonFormatFailureCount(totalFailure, totalFormatError),
+		"model_failure_count":      nonFormatFailureCount(totalFailure, totalFormatError),
+		"model_error_count":        nonFormatFailureCount(totalFailure, totalFormatError) + totalEmpty,
+		"non_empty_count":          totalSuccess,
 		"empty_count":              totalEmpty,
 		"success_rate":             roundRate(overallRate),
+		"model_success_rate":       roundRate(modelRate),
+		"model_availability_rate":  roundRate(modelRate),
 		"current_status":           getStatusColor(overallRate, totalReqs),
+		"model_current_status":     modelStatus,
 		"within_5s_rate":           perf["within_5s_rate"],
 		"within_10s_rate":          perf["within_10s_rate"],
 		"duration_within_10s_rate": perf["duration_within_10s_rate"],
@@ -1496,6 +1668,7 @@ func (s *ModelStatusService) AggregateDay(date string) error {
 		chanSlot: make(map[int64]map[int]*slotCounts),
 		chanName: make(map[int64]string),
 	}
+	rules := GetErrorRules()
 
 	cursorCreatedAt := startTime - 1
 	cursorID := int64(0)
@@ -1508,7 +1681,7 @@ func (s *ModelStatusService) AggregateDay(date string) error {
 			break
 		}
 		for _, row := range rows {
-			s.accumulateDayRow(snap, row, startTime)
+			s.accumulateDayRow(snap, row, startTime, rules)
 		}
 		lastRow := rows[len(rows)-1]
 		cursorCreatedAt = toInt64(lastRow["created_at"])
@@ -1536,7 +1709,7 @@ func (s *ModelStatusService) AggregateDay(date string) error {
 
 // accumulateDayRow folds a single log row into both the per-model and
 // per-channel accumulators of the snapshot.
-func (s *ModelStatusService) accumulateDayRow(snap *daySnapshot, row map[string]interface{}, startTime int64) {
+func (s *ModelStatusService) accumulateDayRow(snap *daySnapshot, row map[string]interface{}, startTime int64, rules ErrorRuleConfig) {
 	logType := toInt64(row["type"])
 	if logType != 2 && logType != 5 {
 		return
@@ -1545,6 +1718,10 @@ func (s *ModelStatusService) accumulateDayRow(snap *daySnapshot, row map[string]
 	createdAt := toInt64(row["created_at"])
 	completion := toFloat64(row["completion_tokens"])
 	channelID := toInt64(row["channel_id"])
+	errorBucket := ""
+	if logType == 5 {
+		errorBucket = rules.classifyOtherJSON(parseOtherJSON(row["other"]))
+	}
 	slotIdx := int((createdAt - startTime) / historySlotSeconds)
 	if slotIdx < 0 {
 		slotIdx = 0
@@ -1581,6 +1758,14 @@ func (s *ModelStatusService) accumulateDayRow(snap *daySnapshot, row map[string]
 		case logType == 5:
 			c.failure++
 			mstat.failureCount++
+			switch errorBucket {
+			case ErrorBucketUserFormat:
+				c.formatError++
+				mstat.formatError++
+			case ErrorBucketRateLimit:
+				c.rateLimit++
+				mstat.rateLimit++
+			}
 		case logType == 2 && completion == 0:
 			c.empty++
 			mstat.emptyCount++
@@ -1611,6 +1796,14 @@ func (s *ModelStatusService) accumulateDayRow(snap *daySnapshot, row map[string]
 	case logType == 5:
 		chStat.failureCount++
 		chSlot.failure++
+		switch errorBucket {
+		case ErrorBucketUserFormat:
+			chStat.formatError++
+			chSlot.formatError++
+		case ErrorBucketRateLimit:
+			chStat.rateLimit++
+			chSlot.rateLimit++
+		}
 	case logType == 2 && completion == 0:
 		chStat.emptyCount++
 		chSlot.empty++

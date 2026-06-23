@@ -38,6 +38,8 @@ type dailyPerfStats struct {
 	totalRequests int64
 	successCount  int64
 	failureCount  int64
+	formatError   int64
+	rateLimit     int64
 	emptyCount    int64
 
 	timedRequests         int64
@@ -106,6 +108,8 @@ func (s *ModelHistoryService) ensureSchema() error {
 			total_requests INTEGER NOT NULL DEFAULT 0,
 			success_count INTEGER NOT NULL DEFAULT 0,
 			failure_count INTEGER NOT NULL DEFAULT 0,
+			format_error_count INTEGER NOT NULL DEFAULT 0,
+			rate_limit_count INTEGER NOT NULL DEFAULT 0,
 			empty_count INTEGER NOT NULL DEFAULT 0,
 			timed_requests INTEGER NOT NULL DEFAULT 0,
 			within_5s INTEGER NOT NULL DEFAULT 0,
@@ -133,6 +137,8 @@ func (s *ModelHistoryService) ensureSchema() error {
 			total_requests INTEGER NOT NULL DEFAULT 0,
 			success_count INTEGER NOT NULL DEFAULT 0,
 			failure_count INTEGER NOT NULL DEFAULT 0,
+			format_error_count INTEGER NOT NULL DEFAULT 0,
+			rate_limit_count INTEGER NOT NULL DEFAULT 0,
 			empty_count INTEGER NOT NULL DEFAULT 0,
 			timed_requests INTEGER NOT NULL DEFAULT 0,
 			within_5s INTEGER NOT NULL DEFAULT 0,
@@ -159,6 +165,8 @@ func (s *ModelHistoryService) ensureSchema() error {
 			total_requests INTEGER NOT NULL DEFAULT 0,
 			success_count INTEGER NOT NULL DEFAULT 0,
 			failure_count INTEGER NOT NULL DEFAULT 0,
+			format_error_count INTEGER NOT NULL DEFAULT 0,
+			rate_limit_count INTEGER NOT NULL DEFAULT 0,
 			empty_count INTEGER NOT NULL DEFAULT 0,
 			timed_requests INTEGER NOT NULL DEFAULT 0,
 			within_5s INTEGER NOT NULL DEFAULT 0,
@@ -185,6 +193,8 @@ func (s *ModelHistoryService) ensureSchema() error {
 			total_requests INTEGER NOT NULL DEFAULT 0,
 			success_count INTEGER NOT NULL DEFAULT 0,
 			failure_count INTEGER NOT NULL DEFAULT 0,
+			format_error_count INTEGER NOT NULL DEFAULT 0,
+			rate_limit_count INTEGER NOT NULL DEFAULT 0,
 			empty_count INTEGER NOT NULL DEFAULT 0,
 			timed_requests INTEGER NOT NULL DEFAULT 0,
 			within_5s INTEGER NOT NULL DEFAULT 0,
@@ -214,19 +224,15 @@ func (s *ModelHistoryService) ensureSchema() error {
 			return err
 		}
 	}
-	if err := s.ensureColumn("model_daily_channel", "success_count", "INTEGER NOT NULL DEFAULT 0"); err != nil {
-		return err
-	}
-	if err := s.ensureColumn("model_daily_channel", "failure_count", "INTEGER NOT NULL DEFAULT 0"); err != nil {
-		return err
-	}
-	if err := s.ensureColumn("model_daily_channel", "empty_count", "INTEGER NOT NULL DEFAULT 0"); err != nil {
-		return err
-	}
 	perfColumns := []struct {
 		name       string
 		definition string
 	}{
+		{"success_count", "INTEGER NOT NULL DEFAULT 0"},
+		{"failure_count", "INTEGER NOT NULL DEFAULT 0"},
+		{"format_error_count", "INTEGER NOT NULL DEFAULT 0"},
+		{"rate_limit_count", "INTEGER NOT NULL DEFAULT 0"},
+		{"empty_count", "INTEGER NOT NULL DEFAULT 0"},
 		{"timed_requests", "INTEGER NOT NULL DEFAULT 0"},
 		{"within_5s", "INTEGER NOT NULL DEFAULT 0"},
 		{"within_10s", "INTEGER NOT NULL DEFAULT 0"},
@@ -333,10 +339,12 @@ type daySnapshot struct {
 }
 
 type slotCounts struct {
-	total   int64
-	success int64
-	failure int64
-	empty   int64
+	total       int64
+	success     int64
+	failure     int64
+	formatError int64
+	rateLimit   int64
+	empty       int64
 
 	timedRequests         int64
 	within5s              int64
@@ -372,20 +380,20 @@ func (s *ModelHistoryService) SaveDay(snap *daySnapshot) error {
 	}
 
 	summaryStmt, err := tx.Prepare(`INSERT INTO model_daily_summary (
-		date, model_name, total_requests, success_count, failure_count, empty_count,
+		date, model_name, total_requests, success_count, failure_count, format_error_count, rate_limit_count, empty_count,
 		timed_requests, within_5s, within_10s, duration_timed_requests,
 		duration_within_10s, duration_within_20s, output_requests, claude_requests,
 		cache_denominator_sum, cache_tokens_sum, cache_write_sum,
 		cache_write_tokens_sum, input_tokens_sum, output_tokens_sum,
 		completion_tokens_sum, use_time_sum, start_time
-	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
 	defer summaryStmt.Close()
 	for name, st := range snap.models {
 		if _, err := summaryStmt.Exec(
-			snap.date, name, st.totalRequests, st.successCount, st.failureCount, st.emptyCount,
+			snap.date, name, st.totalRequests, st.successCount, st.failureCount, st.formatError, st.rateLimit, st.emptyCount,
 			st.timedRequests, st.within5s, st.within10s, st.durationTimedRequests,
 			st.durationWithin10s, st.durationWithin20s, st.outputRequests, st.claudeRequests,
 			st.cacheDenominatorSum, st.cacheTokensSum, st.cacheWriteSum,
@@ -397,13 +405,13 @@ func (s *ModelHistoryService) SaveDay(snap *daySnapshot) error {
 	}
 
 	slotStmt, err := tx.Prepare(`INSERT INTO model_hourly_slot (
-		date, model_name, slot_idx, total_requests, success_count, failure_count, empty_count,
+		date, model_name, slot_idx, total_requests, success_count, failure_count, format_error_count, rate_limit_count, empty_count,
 		timed_requests, within_5s, within_10s, duration_timed_requests,
 		duration_within_10s, duration_within_20s, output_requests, claude_requests,
 		cache_denominator_sum, cache_tokens_sum, cache_write_sum,
 		cache_write_tokens_sum, input_tokens_sum, output_tokens_sum,
 		completion_tokens_sum, use_time_sum
-	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -411,7 +419,7 @@ func (s *ModelHistoryService) SaveDay(snap *daySnapshot) error {
 	for name, slots := range snap.slots {
 		for idx, c := range slots {
 			if _, err := slotStmt.Exec(
-				snap.date, name, idx, c.total, c.success, c.failure, c.empty,
+				snap.date, name, idx, c.total, c.success, c.failure, c.formatError, c.rateLimit, c.empty,
 				c.timedRequests, c.within5s, c.within10s, c.durationTimedRequests,
 				c.durationWithin10s, c.durationWithin20s, c.outputRequests, c.claudeRequests,
 				c.cacheDenominatorSum, c.cacheTokensSum, c.cacheWriteSum,
@@ -424,20 +432,20 @@ func (s *ModelHistoryService) SaveDay(snap *daySnapshot) error {
 	}
 
 	chanStmt, err := tx.Prepare(`INSERT INTO model_daily_channel (
-		date, channel_id, channel_name, total_requests, success_count, failure_count, empty_count,
+		date, channel_id, channel_name, total_requests, success_count, failure_count, format_error_count, rate_limit_count, empty_count,
 		timed_requests, within_5s, within_10s,
 		duration_timed_requests, duration_within_10s, duration_within_20s, output_requests,
 		claude_requests, cache_denominator_sum, cache_tokens_sum, cache_write_sum,
 		cache_write_tokens_sum, input_tokens_sum, output_tokens_sum,
 		completion_tokens_sum, use_time_sum
-	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
 	defer chanStmt.Close()
 	for id, st := range snap.channels {
 		if _, err := chanStmt.Exec(
-			snap.date, id, snap.chanName[id], st.totalRequests, st.successCount, st.failureCount, st.emptyCount,
+			snap.date, id, snap.chanName[id], st.totalRequests, st.successCount, st.failureCount, st.formatError, st.rateLimit, st.emptyCount,
 			st.timedRequests, st.within5s, st.within10s,
 			st.durationTimedRequests, st.durationWithin10s, st.durationWithin20s, st.outputRequests,
 			st.claudeRequests, st.cacheDenominatorSum, st.cacheTokensSum, st.cacheWriteSum,
@@ -449,13 +457,13 @@ func (s *ModelHistoryService) SaveDay(snap *daySnapshot) error {
 	}
 
 	chanSlotStmt, err := tx.Prepare(`INSERT INTO channel_hourly_slot (
-		date, channel_id, slot_idx, total_requests, success_count, failure_count, empty_count,
+		date, channel_id, slot_idx, total_requests, success_count, failure_count, format_error_count, rate_limit_count, empty_count,
 		timed_requests, within_5s, within_10s, duration_timed_requests,
 		duration_within_10s, duration_within_20s, output_requests, claude_requests,
 		cache_denominator_sum, cache_tokens_sum, cache_write_sum,
 		cache_write_tokens_sum, input_tokens_sum, output_tokens_sum,
 		completion_tokens_sum, use_time_sum
-	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -463,7 +471,7 @@ func (s *ModelHistoryService) SaveDay(snap *daySnapshot) error {
 	for channelID, slots := range snap.chanSlot {
 		for idx, c := range slots {
 			if _, err := chanSlotStmt.Exec(
-				snap.date, channelID, idx, c.total, c.success, c.failure, c.empty,
+				snap.date, channelID, idx, c.total, c.success, c.failure, c.formatError, c.rateLimit, c.empty,
 				c.timedRequests, c.within5s, c.within10s, c.durationTimedRequests,
 				c.durationWithin10s, c.durationWithin20s, c.outputRequests, c.claudeRequests,
 				c.cacheDenominatorSum, c.cacheTokensSum, c.cacheWriteSum,
@@ -531,7 +539,7 @@ func (s *ModelHistoryService) GetAvailableModelsByDate(date string) ([]map[strin
 
 // getModelSummaryRow loads the stored summary stats for one model/date.
 func (s *ModelHistoryService) getModelSummaryRow(date, modelName string) (*dailyPerfStats, int64, bool, error) {
-	row := s.db.QueryRow(`SELECT total_requests, success_count, failure_count, empty_count,
+	row := s.db.QueryRow(`SELECT total_requests, success_count, failure_count, format_error_count, rate_limit_count, empty_count,
 		timed_requests, within_5s, within_10s, duration_timed_requests,
 		duration_within_10s, duration_within_20s, output_requests, claude_requests,
 		cache_denominator_sum, cache_tokens_sum, cache_write_sum,
@@ -540,7 +548,7 @@ func (s *ModelHistoryService) getModelSummaryRow(date, modelName string) (*daily
 		FROM model_daily_summary WHERE date = ? AND model_name = ?`, date, modelName)
 	st := &dailyPerfStats{}
 	var startTS int64
-	err := row.Scan(&st.totalRequests, &st.successCount, &st.failureCount, &st.emptyCount,
+	err := row.Scan(&st.totalRequests, &st.successCount, &st.failureCount, &st.formatError, &st.rateLimit, &st.emptyCount,
 		&st.timedRequests, &st.within5s, &st.within10s, &st.durationTimedRequests,
 		&st.durationWithin10s, &st.durationWithin20s, &st.outputRequests, &st.claudeRequests,
 		&st.cacheDenominatorSum, &st.cacheTokensSum, &st.cacheWriteSum,
@@ -557,7 +565,7 @@ func (s *ModelHistoryService) getModelSummaryRow(date, modelName string) (*daily
 
 // getModelSlots loads stored hourly slots for one model/date keyed by slot_idx.
 func (s *ModelHistoryService) getModelSlots(date, modelName string) (map[int]*slotCounts, error) {
-	rows, err := s.db.Query(`SELECT slot_idx, total_requests, success_count, failure_count, empty_count,
+	rows, err := s.db.Query(`SELECT slot_idx, total_requests, success_count, failure_count, format_error_count, rate_limit_count, empty_count,
 		timed_requests, within_5s, within_10s, duration_timed_requests,
 		duration_within_10s, duration_within_20s, output_requests, claude_requests,
 		cache_denominator_sum, cache_tokens_sum, cache_write_sum,
@@ -573,7 +581,7 @@ func (s *ModelHistoryService) getModelSlots(date, modelName string) (map[int]*sl
 		var idx int
 		c := &slotCounts{}
 		if err := rows.Scan(
-			&idx, &c.total, &c.success, &c.failure, &c.empty,
+			&idx, &c.total, &c.success, &c.failure, &c.formatError, &c.rateLimit, &c.empty,
 			&c.timedRequests, &c.within5s, &c.within10s, &c.durationTimedRequests,
 			&c.durationWithin10s, &c.durationWithin20s, &c.outputRequests, &c.claudeRequests,
 			&c.cacheDenominatorSum, &c.cacheTokensSum, &c.cacheWriteSum,
@@ -613,6 +621,9 @@ func (s *ModelHistoryService) buildModelStatusFromHistory(date, modelName string
 	if st.totalRequests > 0 {
 		overallRate = float64(st.successCount) / float64(st.totalRequests) * 100
 	}
+	rules := GetErrorRules()
+	modelRate := modelSuccessRate(st.successCount, st.totalRequests, st.formatError, st.rateLimit, rules)
+	modelStatus := getStatusColor(modelRate, modelAvailabilityDenominator(st.totalRequests, st.formatError, st.rateLimit, rules))
 	perf := perfSummaryFromDaily(st)
 
 	return map[string]interface{}{
@@ -623,9 +634,18 @@ func (s *ModelHistoryService) buildModelStatusFromHistory(date, modelName string
 		"total_requests":           st.totalRequests,
 		"success_count":            st.successCount,
 		"failure_count":            st.failureCount,
+		"format_error_count":       st.formatError,
+		"rate_limit_count":         st.rateLimit,
+		"non_format_failure_count": nonFormatFailureCount(st.failureCount, st.formatError),
+		"model_failure_count":      nonFormatFailureCount(st.failureCount, st.formatError),
+		"model_error_count":        nonFormatFailureCount(st.failureCount, st.formatError) + st.emptyCount,
+		"non_empty_count":          st.successCount,
 		"empty_count":              st.emptyCount,
 		"success_rate":             roundRate(overallRate),
+		"model_success_rate":       roundRate(modelRate),
+		"model_availability_rate":  roundRate(modelRate),
 		"current_status":           getStatusColor(overallRate, st.totalRequests),
+		"model_current_status":     modelStatus,
 		"within_5s_rate":           perf["within_5s_rate"],
 		"within_10s_rate":          perf["within_10s_rate"],
 		"duration_within_10s_rate": perf["duration_within_10s_rate"],
@@ -661,7 +681,7 @@ func (s *ModelHistoryService) GetMultipleModelsStatusByDate(modelNames []string,
 // GetChannelPerformanceByDate returns stored channel performance for the date,
 // ordered by request count desc — mirrors GetChannelPerformanceSummaries.
 func (s *ModelHistoryService) GetChannelPerformanceByDate(date string) ([]map[string]interface{}, error) {
-	rows, err := s.db.Query(`SELECT channel_id, channel_name, total_requests, success_count, failure_count, empty_count, timed_requests,
+	rows, err := s.db.Query(`SELECT channel_id, channel_name, total_requests, success_count, failure_count, format_error_count, rate_limit_count, empty_count, timed_requests,
 		within_5s, within_10s, duration_timed_requests, duration_within_10s, duration_within_20s,
 		output_requests, claude_requests, cache_denominator_sum, cache_tokens_sum, cache_write_sum,
 		cache_write_tokens_sum, input_tokens_sum, output_tokens_sum,
@@ -682,7 +702,7 @@ func (s *ModelHistoryService) GetChannelPerformanceByDate(date string) ([]map[st
 		var id int64
 		var name string
 		st := &dailyPerfStats{}
-		if err := rows.Scan(&id, &name, &st.totalRequests, &st.successCount, &st.failureCount, &st.emptyCount, &st.timedRequests,
+		if err := rows.Scan(&id, &name, &st.totalRequests, &st.successCount, &st.failureCount, &st.formatError, &st.rateLimit, &st.emptyCount, &st.timedRequests,
 			&st.within5s, &st.within10s, &st.durationTimedRequests, &st.durationWithin10s, &st.durationWithin20s,
 			&st.outputRequests, &st.claudeRequests, &st.cacheDenominatorSum, &st.cacheTokensSum, &st.cacheWriteSum,
 			&st.cacheWriteTokensSum, &st.inputTokensSum, &st.outputTokensSum,
@@ -702,6 +722,9 @@ func (s *ModelHistoryService) GetChannelPerformanceByDate(date string) ([]map[st
 		if item.st.totalRequests > 0 {
 			successRate = float64(item.st.successCount) / float64(item.st.totalRequests) * 100
 		}
+		rules := GetErrorRules()
+		modelRate := modelSuccessRate(item.st.successCount, item.st.totalRequests, item.st.formatError, item.st.rateLimit, rules)
+		modelStatus := getStatusColor(modelRate, modelAvailabilityDenominator(item.st.totalRequests, item.st.formatError, item.st.rateLimit, rules))
 		name := item.name
 		if name == "" {
 			name = fmt.Sprintf("Channel#%d", item.id)
@@ -712,9 +735,18 @@ func (s *ModelHistoryService) GetChannelPerformanceByDate(date string) ([]map[st
 			"total_requests":           item.st.totalRequests,
 			"success_count":            item.st.successCount,
 			"failure_count":            item.st.failureCount,
+			"format_error_count":       item.st.formatError,
+			"rate_limit_count":         item.st.rateLimit,
+			"non_format_failure_count": nonFormatFailureCount(item.st.failureCount, item.st.formatError),
+			"model_failure_count":      nonFormatFailureCount(item.st.failureCount, item.st.formatError),
+			"model_error_count":        nonFormatFailureCount(item.st.failureCount, item.st.formatError) + item.st.emptyCount,
+			"non_empty_count":          item.st.successCount,
 			"empty_count":              item.st.emptyCount,
 			"success_rate":             roundRate(successRate),
+			"model_success_rate":       roundRate(modelRate),
+			"model_availability_rate":  roundRate(modelRate),
 			"current_status":           getStatusColor(successRate, item.st.totalRequests),
+			"model_current_status":     modelStatus,
 			"within_5s_rate":           perf["within_5s_rate"],
 			"within_10s_rate":          perf["within_10s_rate"],
 			"duration_within_10s_rate": perf["duration_within_10s_rate"],
@@ -736,7 +768,7 @@ func (s *ModelHistoryService) GetChannelPerformanceByDate(date string) ([]map[st
 }
 
 func (s *ModelHistoryService) getChannelSlots(date string, channelID int64) map[int]*slotCounts {
-	rows, err := s.db.Query(`SELECT slot_idx, total_requests, success_count, failure_count, empty_count,
+	rows, err := s.db.Query(`SELECT slot_idx, total_requests, success_count, failure_count, format_error_count, rate_limit_count, empty_count,
 		timed_requests, within_5s, within_10s, duration_timed_requests,
 		duration_within_10s, duration_within_20s, output_requests, claude_requests,
 		cache_denominator_sum, cache_tokens_sum, cache_write_sum,
@@ -753,7 +785,7 @@ func (s *ModelHistoryService) getChannelSlots(date string, channelID int64) map[
 		var idx int
 		c := &slotCounts{}
 		if err := rows.Scan(
-			&idx, &c.total, &c.success, &c.failure, &c.empty,
+			&idx, &c.total, &c.success, &c.failure, &c.formatError, &c.rateLimit, &c.empty,
 			&c.timedRequests, &c.within5s, &c.within10s, &c.durationTimedRequests,
 			&c.durationWithin10s, &c.durationWithin20s, &c.outputRequests, &c.claudeRequests,
 			&c.cacheDenominatorSum, &c.cacheTokensSum, &c.cacheWriteSum,
