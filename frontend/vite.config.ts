@@ -15,6 +15,7 @@ export default defineConfig({
       input: {
         main: path.resolve(__dirname, 'index.html'),
         embed: path.resolve(__dirname, 'embed.html'),
+        multi: path.resolve(__dirname, 'multi.html'),
       },
     },
   },

@@ -1,10 +1,10 @@
 import { useState, useEffect } from 'react'
-import { Login, Layout, TabType, Generator, History, TopUps, Dashboard, Redemptions, Analytics, UserManagement, RealtimeRanking, IPAnalysis, ModelStatusMonitor, AutoGroup, Tokens } from './components'
+import { Login, Layout, TabType, Generator, History, TopUps, Dashboard, Redemptions, Analytics, UserManagement, RealtimeRanking, IPAnalysis, ModelStatusMonitor, MultiSourceMonitorAdmin, AutoGroup, Tokens } from './components'
 import { useAuth } from './contexts/AuthContext'
 import { WarmupScreen } from './components/WarmupScreen'
 
 // Valid tabs
-const validTabs: TabType[] = ['dashboard', 'topups', 'risk', 'ip-analysis', 'analytics', 'model-status', 'users', 'tokens', 'auto-group', 'generator', 'redemptions', 'history']
+const validTabs: TabType[] = ['dashboard', 'topups', 'risk', 'ip-analysis', 'analytics', 'model-status', 'multi-source', 'users', 'tokens', 'auto-group', 'generator', 'redemptions', 'history']
 
 // Get initial tab from URL pathname (supports sub-routes like /risk/ip)
 const getInitialTab = (): TabType => {
@@ -145,6 +145,8 @@ function App() {
         return <Analytics />
       case 'model-status':
         return <ModelStatusMonitor />
+      case 'multi-source':
+        return <MultiSourceMonitorAdmin />
       case 'users':
         return <UserManagement />
       case 'tokens':

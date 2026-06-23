@@ -97,6 +97,7 @@ func main() {
 		handler.RegisterIPMonitoringRoutes(api)
 		handler.RegisterRiskMonitoringRoutes(api)
 		handler.RegisterModelStatusRoutes(api)
+		handler.RegisterMultiSourceRoutes(api)
 
 		// Phase 2.4: Token Management
 		handler.RegisterTokenRoutes(api)
@@ -109,6 +110,7 @@ func main() {
 
 	// Public embed routes (no auth)
 	handler.RegisterModelStatusEmbedRoutes(r)
+	handler.RegisterMultiSourceEmbedRoutes(r)
 
 	// ========== 7. Background tasks ==========
 
