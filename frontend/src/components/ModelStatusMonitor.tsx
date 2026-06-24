@@ -971,6 +971,39 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
     }
   }, [apiUrl, getApiPrefix, getAuthHeaders, timeWindow, isEmbed, showToast, isHistory, selectedDate])
 
+  const fetchRealtimePerformanceSummary = useCallback(async (forceRefresh = false) => {
+    if (forceRefresh) {
+      setRefreshing(true)
+    }
+
+    try {
+      const cacheParam = forceRefresh ? '&no_cache=true' : ''
+      const endpoint = `${apiUrl}${getApiPrefix()}/performance/summary?window=${timeWindow}${cacheParam}`
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify(selectedModels),
+      })
+      const data = await response.json()
+      if (data.success) {
+        const summary = data.data || {}
+        setModelStatuses(Array.isArray(summary.models) ? summary.models : [])
+        setChannelSummaries(Array.isArray(summary.channels) ? summary.channels : [])
+        if (selectedModels.length > 0 || availableModels.length > 0) {
+          setInitialLoading(false)
+        }
+      }
+    } catch (error) {
+      console.error('Failed to fetch realtime performance summary:', error)
+      if (!isEmbed) {
+        showToast('error', '获取性能摘要失败')
+      }
+    } finally {
+      setLoading(false)
+      setRefreshing(false)
+    }
+  }, [apiUrl, getApiPrefix, getAuthHeaders, selectedModels, timeWindow, availableModels.length, isEmbed, showToast])
+
   // Initial load
   useEffect(() => {
     fetchAvailableModels()
@@ -991,8 +1024,12 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
       prevSelectedModels.current = selectedModels
       prevTimeWindow.current = timeWindow
       prevSelectedDate.current = selectedDate
-      fetchModelStatuses(false)  // Use cache on initial load
-      fetchChannelSummaries(false)
+      if (isHistory) {
+        fetchModelStatuses(false)  // Use cache on initial load
+        fetchChannelSummaries(false)
+      } else {
+        fetchRealtimePerformanceSummary(false)
+      }
       return
     }
 
@@ -1008,17 +1045,23 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
     prevTimeWindow.current = timeWindow
     prevSelectedDate.current = selectedDate
 
-    if (modelsChanged || dateChanged) {
-      // Models selection or date changed - fetch fresh data
-      fetchModelStatuses(true)
+    if (isHistory) {
+      if (modelsChanged || dateChanged) {
+        // Models selection or date changed - fetch fresh data
+        fetchModelStatuses(true)
+      } else if (windowChanged) {
+        // Only time window changed - can use cache (pre-warmed)
+        fetchModelStatuses(false)
+      }
+      if (windowChanged || dateChanged) {
+        fetchChannelSummaries(false)
+      }
+    } else if (modelsChanged || dateChanged) {
+      fetchRealtimePerformanceSummary(true)
     } else if (windowChanged) {
-      // Only time window changed - can use cache (pre-warmed)
-      fetchModelStatuses(false)
+      fetchRealtimePerformanceSummary(false)
     }
-    if (windowChanged || dateChanged) {
-      fetchChannelSummaries(false)
-    }
-  }, [selectedModels, timeWindow, selectedDate, fetchModelStatuses, fetchChannelSummaries])
+  }, [selectedModels, timeWindow, selectedDate, isHistory, fetchModelStatuses, fetchChannelSummaries, fetchRealtimePerformanceSummary])
 
   // Auto refresh countdown (历史模式下禁用自动刷新)
   useEffect(() => {
@@ -1028,8 +1071,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
       setCountdown(prev => {
         if (prev <= 1) {
           // Auto refresh should also get fresh data
-          fetchModelStatuses(true)
-          fetchChannelSummaries(true)
+          fetchRealtimePerformanceSummary(true)
           return refreshIntervalRef.current
         }
         return prev - 1
@@ -1037,7 +1079,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
     }, 1000)
 
     return () => clearInterval(timer)
-  }, [refreshInterval, fetchModelStatuses, fetchChannelSummaries])
+  }, [refreshInterval, fetchRealtimePerformanceSummary, isHistory])
 
   // Reset countdown when interval changes
   useEffect(() => {
@@ -1046,8 +1088,12 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
 
   const handleRefresh = () => {
     setCountdown(refreshIntervalRef.current)
-    fetchModelStatuses(true)
-    fetchChannelSummaries(true)
+    if (isHistory) {
+      fetchModelStatuses(true)
+      fetchChannelSummaries(true)
+    } else {
+      fetchRealtimePerformanceSummary(true)
+    }
   }
 
   // DnD sensors
@@ -2112,8 +2158,12 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
             await saveErrorRulesToBackend(rules)
             setShowErrorRulesDialog(false)
             showToast('success', '错误分类规则已更新')
-            fetchModelStatuses(true)
-            fetchChannelSummaries(true)
+            if (isHistory) {
+              fetchModelStatuses(true)
+              fetchChannelSummaries(true)
+            } else {
+              fetchRealtimePerformanceSummary(true)
+            }
           }}
         />
       )}

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"crypto/sha1"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -1012,6 +1013,267 @@ func (s *ModelStatusService) getModelPerformanceMap(modelNames []string, startTi
 	}
 
 	return result
+}
+
+type realtimePerformanceAggregate struct {
+	modelAvailability   map[string]*availabilityStats
+	modelPerformance    map[string]*performanceStats
+	channelAvailability map[int64]*availabilityStats
+	channelPerformance  map[int64]*performanceStats
+}
+
+func (s *ModelStatusService) aggregateRealtimePerformance(modelNames []string, startTime, now int64, slotSeconds int64, numSlots int) (*realtimePerformanceAggregate, error) {
+	agg := &realtimePerformanceAggregate{
+		modelAvailability:   make(map[string]*availabilityStats, len(modelNames)),
+		modelPerformance:    make(map[string]*performanceStats, len(modelNames)),
+		channelAvailability: make(map[int64]*availabilityStats),
+		channelPerformance:  make(map[int64]*performanceStats),
+	}
+
+	selectedModels := make(map[string]bool, len(modelNames))
+	for _, modelName := range modelNames {
+		selectedModels[modelName] = true
+		if _, ok := agg.modelAvailability[modelName]; !ok {
+			agg.modelAvailability[modelName] = newAvailabilityStats()
+			agg.modelPerformance[modelName] = &performanceStats{}
+		}
+	}
+
+	rules := GetErrorRules()
+	cursorCreatedAt := startTime - 1
+	cursorID := int64(0)
+	for {
+		rows, err := s.fetchPerformanceLogBatch(startTime, now, cursorCreatedAt, cursorID, nil)
+		if err != nil {
+			return nil, err
+		}
+		if len(rows) == 0 {
+			break
+		}
+
+		for _, row := range rows {
+			modelName := toString(row["model_name"])
+			if selectedModels[modelName] {
+				agg.modelAvailability[modelName].accumulate(row, startTime, slotSeconds, numSlots, rules)
+				accumulatePerformanceRow(agg.modelPerformance[modelName], row)
+			}
+
+			channelID := toInt64(row["channel_id"])
+			channelAvailability := agg.channelAvailability[channelID]
+			if channelAvailability == nil {
+				channelAvailability = newAvailabilityStats()
+				agg.channelAvailability[channelID] = channelAvailability
+			}
+			channelAvailability.accumulate(row, startTime, slotSeconds, numSlots, rules)
+
+			channelPerformance := agg.channelPerformance[channelID]
+			if channelPerformance == nil {
+				channelPerformance = &performanceStats{}
+				agg.channelPerformance[channelID] = channelPerformance
+			}
+			accumulatePerformanceRow(channelPerformance, row)
+		}
+
+		lastRow := rows[len(rows)-1]
+		cursorCreatedAt = toInt64(lastRow["created_at"])
+		cursorID = toInt64(lastRow["id"])
+		if len(rows) < performanceLogBatchSize {
+			break
+		}
+	}
+
+	return agg, nil
+}
+
+func buildModelPerformanceResult(modelName, window string, availability *availabilityStats, perfStats *performanceStats, startTime int64, slotSeconds int64, numSlots int, rules ErrorRuleConfig) map[string]interface{} {
+	if availability == nil {
+		availability = newAvailabilityStats()
+	}
+	perf := performanceSummaryFromStats(perfStats)
+
+	successRate := float64(100)
+	if availability.totalRequests > 0 {
+		successRate = float64(availability.successCount) / float64(availability.totalRequests) * 100
+	}
+	modelRate := modelSuccessRate(availability.successCount, availability.totalRequests, availability.formatError, availability.rateLimit, rules)
+	modelStatus := getStatusColor(modelRate, modelAvailabilityDenominator(availability.totalRequests, availability.formatError, availability.rateLimit, rules))
+
+	return map[string]interface{}{
+		"model_name":               modelName,
+		"display_name":             modelName,
+		"time_window":              window,
+		"total_requests":           availability.totalRequests,
+		"success_count":            availability.successCount,
+		"failure_count":            availability.failureCount,
+		"format_error_count":       availability.formatError,
+		"rate_limit_count":         availability.rateLimit,
+		"non_format_failure_count": nonFormatFailureCount(availability.failureCount, availability.formatError),
+		"model_failure_count":      nonFormatFailureCount(availability.failureCount, availability.formatError),
+		"model_error_count":        nonFormatFailureCount(availability.failureCount, availability.formatError) + availability.emptyCount,
+		"non_empty_count":          availability.successCount,
+		"empty_count":              availability.emptyCount,
+		"success_rate":             roundRate(successRate),
+		"model_success_rate":       roundRate(modelRate),
+		"model_availability_rate":  roundRate(modelRate),
+		"current_status":           getStatusColor(successRate, availability.totalRequests),
+		"model_current_status":     modelStatus,
+		"within_5s_rate":           perf["within_5s_rate"],
+		"within_10s_rate":          perf["within_10s_rate"],
+		"duration_within_10s_rate": perf["duration_within_10s_rate"],
+		"duration_within_20s_rate": perf["duration_within_20s_rate"],
+		"cache_hit_rate":           perf["cache_hit_rate"],
+		"cache_write_rate":         perf["cache_write_rate"],
+		"cache_hit_tokens":         perf["cache_hit_tokens"],
+		"cache_write_tokens":       perf["cache_write_tokens"],
+		"total_input_tokens":       perf["total_input_tokens"],
+		"total_output_tokens":      perf["total_output_tokens"],
+		"completion_tps":           perf["completion_tps"],
+		"timed_requests":           perf["timed_requests"],
+		"duration_timed_requests":  perf["duration_timed_requests"],
+		"output_requests":          perf["output_requests"],
+		"slot_data":                buildAvailabilitySlotData(availability.slots, startTime, slotSeconds, numSlots),
+	}
+}
+
+func buildChannelPerformanceResult(channelID int64, channelName string, availability *availabilityStats, perfStats *performanceStats, startTime int64, slotSeconds int64, numSlots int, rules ErrorRuleConfig) map[string]interface{} {
+	if availability == nil {
+		availability = newAvailabilityStats()
+	}
+	perf := performanceSummaryFromStats(perfStats)
+
+	successRate := float64(100)
+	if availability.totalRequests > 0 {
+		successRate = float64(availability.successCount) / float64(availability.totalRequests) * 100
+	}
+	modelRate := modelSuccessRate(availability.successCount, availability.totalRequests, availability.formatError, availability.rateLimit, rules)
+	modelStatus := getStatusColor(modelRate, modelAvailabilityDenominator(availability.totalRequests, availability.formatError, availability.rateLimit, rules))
+	if channelName == "" {
+		channelName = fmt.Sprintf("Channel#%d", channelID)
+	}
+
+	return map[string]interface{}{
+		"channel_id":               channelID,
+		"channel_name":             channelName,
+		"total_requests":           availability.totalRequests,
+		"success_count":            availability.successCount,
+		"failure_count":            availability.failureCount,
+		"format_error_count":       availability.formatError,
+		"rate_limit_count":         availability.rateLimit,
+		"non_format_failure_count": nonFormatFailureCount(availability.failureCount, availability.formatError),
+		"model_failure_count":      nonFormatFailureCount(availability.failureCount, availability.formatError),
+		"model_error_count":        nonFormatFailureCount(availability.failureCount, availability.formatError) + availability.emptyCount,
+		"non_empty_count":          availability.successCount,
+		"empty_count":              availability.emptyCount,
+		"success_rate":             roundRate(successRate),
+		"model_success_rate":       roundRate(modelRate),
+		"model_availability_rate":  roundRate(modelRate),
+		"current_status":           getStatusColor(successRate, availability.totalRequests),
+		"model_current_status":     modelStatus,
+		"within_5s_rate":           perf["within_5s_rate"],
+		"within_10s_rate":          perf["within_10s_rate"],
+		"duration_within_10s_rate": perf["duration_within_10s_rate"],
+		"duration_within_20s_rate": perf["duration_within_20s_rate"],
+		"cache_hit_rate":           perf["cache_hit_rate"],
+		"cache_write_rate":         perf["cache_write_rate"],
+		"cache_hit_tokens":         perf["cache_hit_tokens"],
+		"cache_write_tokens":       perf["cache_write_tokens"],
+		"total_input_tokens":       perf["total_input_tokens"],
+		"total_output_tokens":      perf["total_output_tokens"],
+		"completion_tps":           perf["completion_tps"],
+		"timed_requests":           perf["timed_requests"],
+		"duration_timed_requests":  perf["duration_timed_requests"],
+		"output_requests":          perf["output_requests"],
+		"slot_data":                buildAvailabilitySlotData(availability.slots, startTime, slotSeconds, numSlots),
+	}
+}
+
+func performanceSummaryCacheKey(window string, modelNames []string) string {
+	sum := sha1.Sum([]byte(strings.Join(modelNames, "\x00")))
+	return fmt.Sprintf("model_status:performance_summary:v1:%s:%x", window, sum)
+}
+
+// GetRealtimePerformanceSummary scans the live logs once (in batches) and
+// builds both model cards and channel cards from the same rows.
+func (s *ModelStatusService) GetRealtimePerformanceSummary(modelNames []string, window string, useCache bool) (map[string]interface{}, error) {
+	window = NormalizeTimeWindow(window)
+	twConfig, ok := ParseTimeWindow(window)
+	if !ok {
+		window = DefaultTimeWindow
+		twConfig = timeWindowConfigs[DefaultTimeWindow]
+	}
+
+	cacheKey := performanceSummaryCacheKey(window, modelNames)
+	cm := cache.Get()
+	if useCache {
+		var cached map[string]interface{}
+		found, _ := cm.GetJSON(cacheKey, &cached)
+		if found {
+			return cached, nil
+		}
+	}
+
+	now := time.Now().Unix()
+	startTime := now - twConfig.totalSeconds
+	agg, err := s.aggregateRealtimePerformance(modelNames, startTime, now, twConfig.slotSeconds, twConfig.numSlots)
+	if err != nil {
+		return nil, err
+	}
+
+	rules := GetErrorRules()
+	models := make([]map[string]interface{}, 0, len(modelNames))
+	for _, modelName := range modelNames {
+		models = append(models, buildModelPerformanceResult(
+			modelName,
+			window,
+			agg.modelAvailability[modelName],
+			agg.modelPerformance[modelName],
+			startTime,
+			twConfig.slotSeconds,
+			twConfig.numSlots,
+			rules,
+		))
+	}
+
+	channelIDs := make([]int64, 0, len(agg.channelAvailability))
+	for channelID := range agg.channelAvailability {
+		channelIDs = append(channelIDs, channelID)
+	}
+	channelNames := s.getChannelNameMap(channelIDs)
+
+	sort.Slice(channelIDs, func(i, j int) bool {
+		left := agg.channelAvailability[channelIDs[i]]
+		right := agg.channelAvailability[channelIDs[j]]
+		if left.totalRequests == right.totalRequests {
+			return channelIDs[i] < channelIDs[j]
+		}
+		return left.totalRequests > right.totalRequests
+	})
+
+	channels := make([]map[string]interface{}, 0, len(channelIDs))
+	for _, channelID := range channelIDs {
+		availability := agg.channelAvailability[channelID]
+		if availability.totalRequests <= 0 {
+			continue
+		}
+		channels = append(channels, buildChannelPerformanceResult(
+			channelID,
+			channelNames[channelID],
+			availability,
+			agg.channelPerformance[channelID],
+			startTime,
+			twConfig.slotSeconds,
+			twConfig.numSlots,
+			rules,
+		))
+	}
+
+	result := map[string]interface{}{
+		"models":      models,
+		"channels":    channels,
+		"time_window": window,
+	}
+	cm.Set(cacheKey, result, 30*time.Second)
+	return result, nil
 }
 
 func (s *ModelStatusService) GetChannelPerformanceSummaries(window string) ([]map[string]interface{}, error) {

@@ -16,6 +16,7 @@ func RegisterModelStatusRoutes(r *gin.RouterGroup) {
 	{
 		g.GET("/time-windows", GetTimeWindows)
 		g.GET("/models", GetAvailableModels)
+		g.POST("/performance/summary", GetRealtimePerformanceSummary)
 		g.GET("/channels/performance", GetChannelPerformanceSummaries)
 		g.GET("/status/:model_name", GetSingleModelStatus)
 		g.POST("/status/multiple", GetMultipleModelsStatusHandler)
@@ -70,6 +71,7 @@ func RegisterModelStatusEmbedRoutes(r *gin.Engine) {
 	{
 		g.GET("/time-windows", GetTimeWindows)
 		g.GET("/models", GetAvailableModels)
+		g.POST("/performance/summary", GetRealtimePerformanceSummary)
 		g.GET("/channels/performance", GetChannelPerformanceSummaries)
 		g.GET("/status/:model_name", GetSingleModelStatus)
 		g.POST("/status/multiple", GetMultipleModelsStatusHandler)
@@ -85,6 +87,7 @@ func RegisterModelStatusEmbedRoutes(r *gin.Engine) {
 	{
 		e.GET("/time-windows", GetTimeWindows)
 		e.GET("/models", GetAvailableModels)
+		e.POST("/performance/summary", GetRealtimePerformanceSummary)
 		e.GET("/channels/performance", GetChannelPerformanceSummaries)
 		e.GET("/status/:model_name", GetSingleModelStatus)
 		e.POST("/status/multiple", GetMultipleModelsStatusHandler)
@@ -114,6 +117,31 @@ func GetAvailableModels(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": data})
+}
+
+// POST /performance/summary
+func GetRealtimePerformanceSummary(c *gin.Context) {
+	var modelNames []string
+	if err := c.ShouldBindJSON(&modelNames); err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResp("INVALID_PARAMS", "Expected array of model names", err.Error()))
+		return
+	}
+	window := c.DefaultQuery("window", service.DefaultTimeWindow)
+	noCacheParam := c.DefaultQuery("no_cache", "false")
+	noCache := noCacheParam == "true" || noCacheParam == "1"
+
+	svc := service.NewModelStatusService()
+	data, err := svc.GetRealtimePerformanceSummary(modelNames, window, !noCache)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResp("QUERY_ERROR", err.Error(), ""))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success":     true,
+		"data":        data,
+		"time_window": data["time_window"],
+		"cache_ttl":   60,
+	})
 }
 
 // GET /channels/performance
