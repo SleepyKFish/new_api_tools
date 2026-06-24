@@ -3242,28 +3242,20 @@ function StatusSlotBar({
             </div>
             <div className="flex justify-between gap-4">
               <span>可用率:</span>
-              <span className={cn(
-                "font-medium",
-                getSlotDisplayStatus(hoveredSlot) === 'green' ? 'text-green-600' :
-                  getSlotDisplayStatus(hoveredSlot) === 'yellow' ? 'text-yellow-600' : 'text-red-600'
-              )}>
+              <span className="font-medium text-emerald-600">
                 {getSlotAvailabilityRate(hoveredSlot).toFixed(1)}%
               </span>
             </div>
             <div className="flex justify-between gap-4">
               <span>成功率:</span>
-              <span className={cn(
-                "font-medium",
-                getSlotDisplayStatus(hoveredSlot) === 'green' ? 'text-green-600' :
-                  getSlotDisplayStatus(hoveredSlot) === 'yellow' ? 'text-yellow-600' : 'text-red-600'
-              )}>
+              <span className="font-medium text-sky-600">
                 {hoveredSlot.total_requests > 0 ? (hoveredSlot.success_count / hoveredSlot.total_requests * 100).toFixed(1) : '0.0'}%
               </span>
             </div>
             <div className="flex justify-between gap-4">
               <span>失败率:</span>
               <span className="font-medium">
-                <span className="text-rose-500">{ratePercent(
+                <span className="text-red-600">{ratePercent(
                   (hoveredSlot.non_format_failure_count ?? hoveredSlot.model_failure_count ?? Math.max(0, hoveredSlot.failure_count - (hoveredSlot.format_error_count ?? 0))) + (hoveredSlot.rate_limit_count ?? 0),
                   hoveredSlot.total_requests
                 )}%</span>
