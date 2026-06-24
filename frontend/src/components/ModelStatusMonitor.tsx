@@ -3028,7 +3028,15 @@ function TopStackedStats({
         </span>
       ),
     },
-    { title: '成功率', content: <><span className="text-muted-foreground/70">成功 </span><span className="font-medium text-foreground/80">{successRate}%</span></> },
+    {
+      title: '成功率',
+      content: (
+        <span className="inline-flex items-baseline gap-1">
+          <span className="text-muted-foreground/70">成功</span>
+          <span className="font-medium text-foreground/80">{successRate}%</span>
+        </span>
+      ),
+    },
     { title: '请求数', content: <span>{totalRequests.toLocaleString()}</span> },
   ]
   const errorItems = [
