@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from './Toast'
 import { cn } from '../lib/utils'
-import { RefreshCw, Loader2, Timer, ChevronDown, Settings2, Check, Clock, Palette, Moon, Sun, Minimize2, Maximize2, Zap, Terminal, Leaf, Droplets, HelpCircle, Copy, X, Command, LayoutGrid, Bot, MessageSquareQuote, Triangle, Sparkles, CreditCard, GitBranch, Gamepad2, Rocket, Brain, ArrowUpDown, Search, Filter, Layers, Plus, Pencil, Trash2, FolderPlus, Tag, KeyRound, CalendarDays, ShieldAlert, FileWarning } from 'lucide-react'
+import { RefreshCw, Loader2, Timer, ChevronDown, Settings2, Check, Clock, Palette, Moon, Sun, Minimize2, Maximize2, Zap, Terminal, Leaf, Droplets, HelpCircle, Copy, X, Command, LayoutGrid, Bot, MessageSquareQuote, Triangle, Sparkles, CreditCard, GitBranch, Gamepad2, Rocket, Brain, ArrowUpDown, Search, Filter, Layers, Plus, Pencil, Trash2, FolderPlus, Tag, KeyRound, CalendarDays, ShieldAlert, FileWarning, Inbox } from 'lucide-react'
 import { DndContext, closestCenter, KeyboardSensor, PointerSensor, useSensor, useSensors, DragEndEvent } from '@dnd-kit/core'
 import { SortableContext, sortableKeyboardCoordinates, rectSortingStrategy, useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
@@ -3019,15 +3019,23 @@ function TopStackedStats({
   const total = formatTokenCount(inputTokens + outputTokens)
   const successRate = totalRequests > 0 ? (successCount / totalRequests * 100).toFixed(1) : '0.0'
   const mainItems = [
-    { title: '成功率', content: <><span className={cn("font-semibold", successClassName)}>成功 {successRate}%</span></> },
-    { title: '可用率', content: <><span className={cn("font-semibold", successClassName)}>可用 {availabilityRate.toFixed(1)}%</span></> },
+    {
+      title: '可用率',
+      content: (
+        <span className="inline-flex items-baseline gap-1">
+          <span className="text-muted-foreground/70">可用</span>
+          <span className={cn("text-base font-bold leading-none", successClassName)}>{availabilityRate.toFixed(1)}%</span>
+        </span>
+      ),
+    },
+    { title: '成功率', content: <><span className="text-muted-foreground/70">成功 </span><span className="font-medium text-foreground/80">{successRate}%</span></> },
     { title: '请求数', content: <span>{totalRequests.toLocaleString()}</span> },
   ]
   const errorItems = [
     {
-      title: `上游服务报错率 = ${modelFailureCount.toLocaleString()} / ${totalRequests.toLocaleString()}`,
+      title: `上游报错率 = ${modelFailureCount.toLocaleString()} / ${totalRequests.toLocaleString()}`,
       icon: ShieldAlert,
-      label: '上游服务',
+      label: '上游',
       count: modelFailureCount,
       value: `${ratePercent(modelFailureCount, totalRequests)}%`,
       color: 'text-rose-500',
@@ -3050,16 +3058,30 @@ function TopStackedStats({
     },
     {
       title: `空响应率 = ${emptyRate}%`,
+      icon: Inbox,
+      label: '空返',
       count: 1,
-      value: emptyRate,
+      value: `${emptyRate}%`,
       color: 'text-amber-500',
     },
   ]
   const tokenItems = [
-    { title: cacheHit.full, content: <><span className="text-muted-foreground/70">命中 </span><span className="font-semibold text-amber-600 dark:text-amber-400">{cacheHit.compact}</span></> },
-    { title: cacheWrite.full, content: <><span className="text-muted-foreground/70">写 </span><span className="font-semibold text-amber-600 dark:text-amber-400">{cacheWrite.compact}</span></> },
-    { title: output.full, content: <><span className="text-muted-foreground/70">输出 </span><span className="font-semibold text-emerald-600 dark:text-emerald-400">{output.compact}</span></> },
-    { title: total.full, content: <><span className="text-muted-foreground/70">总计 </span><span className="font-semibold text-sky-600 dark:text-sky-400">{total.compact}</span></> },
+    {
+      title: cacheHit.full,
+      content: <span className="inline-flex items-baseline gap-1"><span className="text-muted-foreground/70">命中</span><span className="font-semibold text-amber-600 dark:text-amber-400">{cacheHit.compact}</span></span>,
+    },
+    {
+      title: cacheWrite.full,
+      content: <span className="inline-flex items-baseline gap-1"><span className="text-muted-foreground/70">写入</span><span className="font-semibold text-amber-600 dark:text-amber-400">{cacheWrite.compact}</span></span>,
+    },
+    {
+      title: output.full,
+      content: <span className="inline-flex items-baseline gap-1"><span className="text-muted-foreground/70">输出</span><span className="font-semibold text-emerald-600 dark:text-emerald-400">{output.compact}</span></span>,
+    },
+    {
+      title: total.full,
+      content: <span className="inline-flex items-baseline gap-1"><span className="text-muted-foreground/70">总量</span><span className="font-semibold text-sky-600 dark:text-sky-400">{total.compact}</span></span>,
+    },
   ]
 
   return (
@@ -3096,7 +3118,7 @@ function ErrorCategoryRow({
               aria-label={`${item.title}: ${item.value}`}
             >
               {Icon && <Icon className="h-3 w-3 flex-shrink-0" strokeWidth={2} />}
-              <span>{item.label ? `${item.label} ${item.count > 0 ? item.value : '0%'}` : `空 ${item.value}%`}</span>
+              <span>{item.label ? `${item.label} ${item.count > 0 ? item.value : '0%'}` : `空返 ${item.value}%`}</span>
             </span>
           </span>
         )
@@ -3239,10 +3261,7 @@ function StatusSlotBar({
               </span>
             </div>
             <div className="flex justify-between gap-4">
-              <span className="inline-flex items-center gap-1">
-                <ShieldAlert className="h-3 w-3 text-rose-500" strokeWidth={2} />
-                失败率:
-              </span>
+              <span>失败率:</span>
               <span className="font-medium">
                 <span className="text-rose-500">{ratePercent(
                   (hoveredSlot.non_format_failure_count ?? hoveredSlot.model_failure_count ?? Math.max(0, hoveredSlot.failure_count - (hoveredSlot.format_error_count ?? 0))) + (hoveredSlot.rate_limit_count ?? 0),
