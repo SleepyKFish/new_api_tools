@@ -1933,6 +1933,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                           modelFailureCount={upstreamFailureCount}
                           formatErrorCount={formatErrorCount}
                           rateLimitCount={rateLimitCount}
+                          emptyCount={channel.empty_count}
                           emptyRate={channel.total_requests > 0 ? (channel.empty_count / channel.total_requests * 100).toFixed(2) : '0.00'}
                           totalRequests={channel.total_requests}
                           cacheHitTokens={channel.cache_hit_tokens}
@@ -2994,6 +2995,7 @@ function TopStackedStats({
   modelFailureCount,
   formatErrorCount,
   rateLimitCount,
+  emptyCount,
   emptyRate,
   totalRequests,
   cacheHitTokens,
@@ -3007,6 +3009,7 @@ function TopStackedStats({
   modelFailureCount: number
   formatErrorCount: number
   rateLimitCount: number
+  emptyCount: number
   emptyRate: string
   totalRequests: number
   cacheHitTokens: number
@@ -3069,7 +3072,7 @@ function TopStackedStats({
       title: `空响应率 = ${emptyRate}%`,
       icon: Inbox,
       label: '空返',
-      count: 1,
+      count: emptyCount,
       value: `${emptyRate}%`,
       color: 'text-yellow-600',
     },
@@ -3127,7 +3130,7 @@ function ErrorCategoryRow({
               aria-label={`${item.title}: ${item.value}`}
             >
               {Icon && <Icon className="h-3 w-3 flex-shrink-0" strokeWidth={2} />}
-              <span>{item.label ? `${item.label} ${item.count > 0 ? item.value : '0%'}` : `空返 ${item.value}%`}</span>
+              <span>{item.label ? `${item.label} ${item.value}` : `空返 ${item.value}%`}</span>
             </span>
           </span>
         )
@@ -3337,6 +3340,7 @@ function ModelStatusCard({ model, isDraggable }: ModelStatusCardProps) {
             modelFailureCount={upstreamFailureCount}
             formatErrorCount={formatErrorCount}
             rateLimitCount={rateLimitCount}
+            emptyCount={model.empty_count}
             emptyRate={emptyRate}
             totalRequests={model.total_requests}
             cacheHitTokens={model.cache_hit_tokens}
