@@ -1904,6 +1904,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                 const formatErrorCount = channel.format_error_count ?? 0
                 const rateLimitCount = channel.rate_limit_count ?? 0
                 const nonFormatFailureCount = channel.non_format_failure_count ?? channel.model_failure_count ?? Math.max(0, channel.failure_count - formatErrorCount)
+                const upstreamFailureCount = Math.max(0, nonFormatFailureCount - rateLimitCount)
                 const cardStatusClass = status === 'red'
                   ? 'border-l-[3px] border-l-red-500 bg-red-500/[0.03]'
                   : status === 'yellow'
@@ -1929,7 +1930,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                             status === 'yellow' ? 'text-yellow-600 dark:text-yellow-400' :
                               'text-red-600 dark:text-red-400'}
                           availabilityRate={getAvailabilityRate(channel)}
-                          modelFailureCount={nonFormatFailureCount}
+                          modelFailureCount={upstreamFailureCount}
                           formatErrorCount={formatErrorCount}
                           rateLimitCount={rateLimitCount}
                           emptyRate={channel.total_requests > 0 ? (channel.empty_count / channel.total_requests * 100).toFixed(2) : '0.00'}
@@ -3046,7 +3047,7 @@ function TopStackedStats({
       label: '上游',
       count: modelFailureCount,
       value: `${ratePercent(modelFailureCount, totalRequests)}%`,
-      color: 'text-rose-500',
+      color: 'text-red-600',
     },
     {
       title: `用户请求格式报错率 = ${formatErrorCount.toLocaleString()} / ${totalRequests.toLocaleString()}`,
@@ -3054,7 +3055,7 @@ function TopStackedStats({
       label: '格式',
       count: formatErrorCount,
       value: `${ratePercent(formatErrorCount, totalRequests)}%`,
-      color: 'text-amber-500',
+      color: 'text-amber-600',
     },
     {
       title: `限速率 = ${rateLimitCount.toLocaleString()} / ${totalRequests.toLocaleString()}`,
@@ -3062,7 +3063,7 @@ function TopStackedStats({
       label: '限速',
       count: rateLimitCount,
       value: `${ratePercent(rateLimitCount, totalRequests)}%`,
-      color: 'text-sky-500',
+      color: 'text-orange-600',
     },
     {
       title: `空响应率 = ${emptyRate}%`,
@@ -3070,7 +3071,7 @@ function TopStackedStats({
       label: '空返',
       count: 1,
       value: `${emptyRate}%`,
-      color: 'text-amber-500',
+      color: 'text-yellow-600',
     },
   ]
   const tokenItems = [
@@ -3297,6 +3298,7 @@ function ModelStatusCard({ model, isDraggable }: ModelStatusCardProps) {
   const formatErrorCount = model.format_error_count ?? 0
   const rateLimitCount = model.rate_limit_count ?? 0
   const nonFormatFailureCount = model.non_format_failure_count ?? model.model_failure_count ?? Math.max(0, model.failure_count - formatErrorCount)
+  const upstreamFailureCount = Math.max(0, nonFormatFailureCount - rateLimitCount)
   const emptyRate = model.total_requests > 0
     ? (model.empty_count / model.total_requests * 100).toFixed(2)
     : '0.00'
@@ -3332,7 +3334,7 @@ function ModelStatusCard({ model, isDraggable }: ModelStatusCardProps) {
             successCount={model.success_count}
             successClassName={rateColorClass}
             availabilityRate={getAvailabilityRate(model)}
-            modelFailureCount={nonFormatFailureCount}
+            modelFailureCount={upstreamFailureCount}
             formatErrorCount={formatErrorCount}
             rateLimitCount={rateLimitCount}
             emptyRate={emptyRate}
