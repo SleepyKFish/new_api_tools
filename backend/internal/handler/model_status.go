@@ -1,8 +1,10 @@
 package handler
 
 import (
+	"errors"
 	"net/http"
 	"regexp"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -18,6 +20,7 @@ func RegisterModelStatusRoutes(r *gin.RouterGroup) {
 		g.GET("/models", GetAvailableModels)
 		g.POST("/performance/summary", GetRealtimePerformanceSummary)
 		g.GET("/channels/performance", GetChannelPerformanceSummaries)
+		g.GET("/channels/:channel_id/models/performance", GetChannelModelPerformance)
 		g.GET("/status/:model_name", GetSingleModelStatus)
 		g.POST("/status/multiple", GetMultipleModelsStatusHandler)
 		g.POST("/status/batch", GetMultipleModelsStatusHandler)
@@ -59,6 +62,8 @@ func RegisterModelStatusRoutes(r *gin.RouterGroup) {
 		g.POST("/history/status/batch", GetHistoryStatusBatch)
 		g.POST("/history/status/multiple", GetHistoryStatusBatch)
 		g.GET("/history/channels/performance", GetHistoryChannelPerformance)
+		g.GET("/history/channels/:channel_id/models/performance", GetHistoryChannelModelPerformance)
+		g.POST("/history/backfill", BackfillHistoryDay)
 	}
 
 }
@@ -73,6 +78,7 @@ func RegisterModelStatusEmbedRoutes(r *gin.Engine) {
 		g.GET("/models", GetAvailableModels)
 		g.POST("/performance/summary", GetRealtimePerformanceSummary)
 		g.GET("/channels/performance", GetChannelPerformanceSummaries)
+		g.GET("/channels/:channel_id/models/performance", GetChannelModelPerformance)
 		g.GET("/status/:model_name", GetSingleModelStatus)
 		g.POST("/status/multiple", GetMultipleModelsStatusHandler)
 		g.POST("/status/batch", GetMultipleModelsStatusHandler)
@@ -89,6 +95,7 @@ func RegisterModelStatusEmbedRoutes(r *gin.Engine) {
 		e.GET("/models", GetAvailableModels)
 		e.POST("/performance/summary", GetRealtimePerformanceSummary)
 		e.GET("/channels/performance", GetChannelPerformanceSummaries)
+		e.GET("/channels/:channel_id/models/performance", GetChannelModelPerformance)
 		e.GET("/status/:model_name", GetSingleModelStatus)
 		e.POST("/status/multiple", GetMultipleModelsStatusHandler)
 		e.POST("/status/batch", GetMultipleModelsStatusHandler)
@@ -147,9 +154,11 @@ func GetRealtimePerformanceSummary(c *gin.Context) {
 // GET /channels/performance
 func GetChannelPerformanceSummaries(c *gin.Context) {
 	window := c.DefaultQuery("window", service.DefaultTimeWindow)
+	noCacheParam := c.DefaultQuery("no_cache", "false")
+	noCache := noCacheParam == "true" || noCacheParam == "1"
 
 	svc := service.NewModelStatusService()
-	data, err := svc.GetChannelPerformanceSummaries(window)
+	data, err := svc.GetChannelPerformanceSummaries(window, !noCache)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResp("QUERY_ERROR", err.Error(), ""))
 		return
@@ -157,9 +166,62 @@ func GetChannelPerformanceSummaries(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"success":     true,
 		"data":        data,
-		"time_window": window,
+		"time_window": service.NormalizeTimeWindow(window),
 		"cache_ttl":   60,
 	})
+}
+
+func parseLimitOffset(c *gin.Context) (int, int) {
+	limit := 100
+	offset := 0
+	if raw := c.Query("limit"); raw != "" {
+		if value, err := strconv.Atoi(raw); err == nil {
+			limit = value
+		}
+	}
+	if raw := c.Query("offset"); raw != "" {
+		if value, err := strconv.Atoi(raw); err == nil {
+			offset = value
+		}
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return limit, offset
+}
+
+func channelIDParam(c *gin.Context) (int64, bool) {
+	channelID, err := strconv.ParseInt(c.Param("channel_id"), 10, 64)
+	if err != nil || channelID < 0 {
+		c.JSON(http.StatusBadRequest, models.ErrorResp("INVALID_PARAMS", "Invalid channel_id", ""))
+		return 0, false
+	}
+	return channelID, true
+}
+
+// GET /channels/:channel_id/models/performance
+func GetChannelModelPerformance(c *gin.Context) {
+	channelID, ok := channelIDParam(c)
+	if !ok {
+		return
+	}
+	window := c.DefaultQuery("window", service.DefaultTimeWindow)
+	limit, offset := parseLimitOffset(c)
+
+	svc := service.NewModelStatusService()
+	data, err := svc.GetChannelModelPerformance(channelID, window, limit, offset)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResp("QUERY_ERROR", err.Error(), ""))
+		return
+	}
+	data["success"] = true
+	c.JSON(http.StatusOK, data)
 }
 
 // GET /status/:model_name
@@ -641,5 +703,73 @@ func GetHistoryChannelPerformance(c *gin.Context) {
 		"data":        data,
 		"date":        date,
 		"time_window": "24h",
+	})
+}
+
+// GET /history/channels/:channel_id/models/performance?date=YYYY-MM-DD
+func GetHistoryChannelModelPerformance(c *gin.Context) {
+	date := c.Query("date")
+	if !validDate(date) {
+		c.JSON(http.StatusBadRequest, models.ErrorResp("INVALID_PARAMS", "Invalid date (expected YYYY-MM-DD)", ""))
+		return
+	}
+	channelID, ok := channelIDParam(c)
+	if !ok {
+		return
+	}
+	limit, offset := parseLimitOffset(c)
+
+	hist, err := service.GetModelHistoryService()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResp("HISTORY_ERROR", err.Error(), ""))
+		return
+	}
+	has, err := hist.HasDate(date)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResp("QUERY_ERROR", err.Error(), ""))
+		return
+	}
+	if !has {
+		c.JSON(http.StatusNotFound, models.ErrorResp("NO_DATA", "该日期暂无历史记录", date))
+		return
+	}
+
+	data, err := hist.GetChannelModelPerformanceByDate(date, channelID, limit, offset)
+	if err != nil {
+		if errors.Is(err, service.ErrHistoryChannelModelDetailNotBuilt) {
+			c.JSON(http.StatusNotFound, gin.H{
+				"success": false,
+				"code":    "DETAIL_NOT_BUILT",
+				"message": "该日期尚未生成渠道模型明细，请先回填历史快照",
+				"date":    date,
+			})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, models.ErrorResp("QUERY_ERROR", err.Error(), ""))
+		return
+	}
+	data["success"] = true
+	c.JSON(http.StatusOK, data)
+}
+
+// POST /history/backfill?date=YYYY-MM-DD
+// 对指定历史日期重新扫描主 logs 表并重建当天快照（含渠道+模型明细）。
+// 用于为 schema 升级前生成、缺少 channel+model 明细的旧历史日期补算。
+func BackfillHistoryDay(c *gin.Context) {
+	date := c.Query("date")
+	if !validDate(date) {
+		c.JSON(http.StatusBadRequest, models.ErrorResp("INVALID_PARAMS", "Invalid date (expected YYYY-MM-DD)", ""))
+		return
+	}
+
+	svc := service.NewModelStatusService()
+	if err := svc.AggregateDay(date); err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResp("BACKFILL_ERROR", err.Error(), date))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"date":    date,
+		"message": "历史快照已重新生成",
 	})
 }

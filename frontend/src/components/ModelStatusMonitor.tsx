@@ -78,6 +78,7 @@ interface ModelStatus {
 interface ChannelPerformance {
   channel_id: number
   channel_name: string
+  model_count?: number
   total_requests: number
   success_count: number
   failure_count: number
@@ -108,6 +109,18 @@ interface ChannelPerformance {
   duration_timed_requests: number
   output_requests: number
   slot_data: SlotStatus[]
+}
+
+interface ChannelModelDetailState {
+  data: ModelStatus[]
+  total: number
+  limit: number
+  offset: number
+  has_more: boolean
+  loading: boolean
+  loadingMore: boolean
+  error?: string
+  detailNotBuilt?: boolean
 }
 
 interface ErrorRuleConfig {
@@ -286,6 +299,7 @@ const GROUP_COLORS = [
 ]
 
 const MODEL_GROUP_KEY = 'model_status_group_filter'
+const CHANNEL_MODEL_PAGE_SIZE = 100
 
 // Get model logo component based on model name
 function getModelLogo(modelName: string): IconComponent | null {
@@ -548,6 +562,8 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
   const [selectedModels, setSelectedModels] = useState<string[]>([])
   const [modelStatuses, setModelStatuses] = useState<ModelStatus[]>([])
   const [channelSummaries, setChannelSummaries] = useState<ChannelPerformance[]>([])
+  const [expandedChannelId, setExpandedChannelId] = useState<number | null>(null)
+  const [channelModelDetails, setChannelModelDetails] = useState<Record<number, ChannelModelDetailState>>({})
   const [loading, setLoading] = useState(true)
   const [initialLoading, setInitialLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
@@ -970,6 +986,119 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
       }
     }
   }, [apiUrl, getApiPrefix, getAuthHeaders, timeWindow, isEmbed, showToast, isHistory, selectedDate])
+
+  const fetchChannelModelDetails = useCallback(async (channelId: number, offset = 0) => {
+    setChannelModelDetails(prev => {
+      const current = prev[channelId]
+      return {
+        ...prev,
+        [channelId]: {
+          data: offset > 0 ? current?.data || [] : [],
+          total: current?.total || 0,
+          limit: CHANNEL_MODEL_PAGE_SIZE,
+          offset,
+          has_more: current?.has_more || false,
+          loading: offset === 0,
+          loadingMore: offset > 0,
+          error: undefined,
+          detailNotBuilt: false,
+        },
+      }
+    })
+
+    try {
+      const query = isHistory
+        ? `date=${selectedDate}&limit=${CHANNEL_MODEL_PAGE_SIZE}&offset=${offset}`
+        : `window=${encodeURIComponent(timeWindow)}&limit=${CHANNEL_MODEL_PAGE_SIZE}&offset=${offset}`
+      const endpoint = isHistory
+        ? `${apiUrl}${getApiPrefix()}/history/channels/${channelId}/models/performance?${query}`
+        : `${apiUrl}${getApiPrefix()}/channels/${channelId}/models/performance?${query}`
+      const response = await fetch(endpoint, {
+        headers: getAuthHeaders(),
+      })
+      const data = await response.json()
+      if (!response.ok || !data.success) {
+        const code = data.code || data.error?.code
+        const message = data.message || data.error?.message || '获取渠道模型明细失败'
+        setChannelModelDetails(prev => ({
+          ...prev,
+          [channelId]: {
+            ...(prev[channelId] || {
+              data: [],
+              total: 0,
+              limit: CHANNEL_MODEL_PAGE_SIZE,
+              offset: 0,
+              has_more: false,
+            }),
+            loading: false,
+            loadingMore: false,
+            error: message,
+            detailNotBuilt: code === 'DETAIL_NOT_BUILT',
+          },
+        }))
+        return
+      }
+
+      const nextData = Array.isArray(data.data) ? data.data as ModelStatus[] : []
+      setChannelModelDetails(prev => {
+        const current = prev[channelId]
+        const merged = offset > 0 ? [...(current?.data || []), ...nextData] : nextData
+        return {
+          ...prev,
+          [channelId]: {
+            data: merged,
+            total: data.total || merged.length,
+            limit: data.limit || CHANNEL_MODEL_PAGE_SIZE,
+            offset: data.offset || offset,
+            has_more: Boolean(data.has_more),
+            loading: false,
+            loadingMore: false,
+            error: undefined,
+            detailNotBuilt: false,
+          },
+        }
+      })
+    } catch (error) {
+      console.error('Failed to fetch channel model details:', error)
+      setChannelModelDetails(prev => ({
+        ...prev,
+        [channelId]: {
+          ...(prev[channelId] || {
+            data: [],
+            total: 0,
+            limit: CHANNEL_MODEL_PAGE_SIZE,
+            offset: 0,
+            has_more: false,
+          }),
+          loading: false,
+          loadingMore: false,
+          error: '获取渠道模型明细失败',
+          detailNotBuilt: false,
+        },
+      }))
+      if (!isEmbed) {
+        showToast('error', '获取渠道模型明细失败')
+      }
+    }
+  }, [apiUrl, getApiPrefix, getAuthHeaders, isHistory, selectedDate, timeWindow, isEmbed, showToast])
+
+  const handleChannelToggle = useCallback((channel: ChannelPerformance) => {
+    if (expandedChannelId === channel.channel_id) {
+      setExpandedChannelId(null)
+      return
+    }
+    setExpandedChannelId(channel.channel_id)
+    const detail = channelModelDetails[channel.channel_id]
+    if (!detail || (detail.data.length === 0 && !detail.loading && !detail.error)) {
+      fetchChannelModelDetails(channel.channel_id, 0)
+    }
+  }, [expandedChannelId, channelModelDetails, fetchChannelModelDetails])
+
+  // 时间窗口 / 历史日期 / 实时与历史模式切换时，已展开的渠道明细会失效，需折叠并清空缓存。
+  useEffect(() => {
+    setExpandedChannelId(null)
+    setChannelModelDetails({})
+  }, [timeWindow, selectedDate, isHistory])
 
   const fetchRealtimePerformanceSummary = useCallback(async (forceRefresh = false) => {
     if (forceRefresh) {
@@ -1957,13 +2086,38 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                     ? 'border-l-[3px] border-l-yellow-500 bg-yellow-500/[0.03]'
                     : ''
 
+                const isExpanded = expandedChannelId === channel.channel_id
+                const detail = channelModelDetails[channel.channel_id]
+
                 return (
                   <Card key={channel.channel_id} className={cn("border border-border/60 shadow-none", cardStatusClass)}>
                     <CardContent className="p-3.5">
-                      <div className="flex items-center gap-2">
+                      <div
+                        className="flex items-center gap-2 cursor-pointer select-none"
+                        onClick={() => handleChannelToggle(channel)}
+                        role="button"
+                        tabIndex={0}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault()
+                            handleChannelToggle(channel)
+                          }
+                        }}
+                      >
+                        <ChevronDown
+                          className={cn(
+                            "h-4 w-4 flex-shrink-0 text-muted-foreground transition-transform",
+                            isExpanded ? "" : "-rotate-90"
+                          )}
+                        />
                         <div className="text-sm font-medium leading-5 truncate" title={channel.channel_name}>
                           {channel.channel_name}
                         </div>
+                        {typeof channel.model_count === 'number' && channel.model_count > 0 && (
+                          <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-5 flex-shrink-0 font-normal">
+                            {channel.model_count} 个模型
+                          </Badge>
+                        )}
                         <Badge
                           variant={status === 'green' ? 'success' : status === 'yellow' ? 'warning' : 'destructive'}
                           className="text-[10px] px-1.5 py-0 h-5 flex-shrink-0"
@@ -2002,6 +2156,59 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                       {channel.slot_data && channel.slot_data.length > 0 && (
                         <div className="mt-3">
                           <StatusSlotBar slots={channel.slot_data} />
+                        </div>
+                      )}
+
+                      {isExpanded && (
+                        <div className="mt-3 pt-3 border-t border-border/60">
+                          {detail?.loading ? (
+                            <div className="flex items-center justify-center py-6 text-sm text-muted-foreground">
+                              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                              加载模型明细…
+                            </div>
+                          ) : detail?.detailNotBuilt ? (
+                            <div className="flex flex-col items-center justify-center py-6 text-center gap-1">
+                              <Inbox className="h-5 w-5 text-muted-foreground" />
+                              <div className="text-sm text-muted-foreground">
+                                {detail.error || '该日期尚未生成渠道模型明细，请先回填历史快照'}
+                              </div>
+                            </div>
+                          ) : detail?.error ? (
+                            <div className="flex flex-col items-center justify-center py-6 text-center gap-2">
+                              <div className="text-sm text-red-600 dark:text-red-400">{detail.error}</div>
+                              <button
+                                onClick={() => fetchChannelModelDetails(channel.channel_id, 0)}
+                                className="text-xs px-2.5 py-1 rounded-md border border-border hover:bg-muted transition-colors"
+                              >
+                                重试
+                              </button>
+                            </div>
+                          ) : detail && detail.data.length > 0 ? (
+                            <div className="space-y-3">
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                {detail.data.map((model) => (
+                                  <ModelStatusCard key={`${channel.channel_id}-${model.model_name}`} model={model} />
+                                ))}
+                              </div>
+                              {detail.has_more && (
+                                <div className="flex justify-center">
+                                  <button
+                                    onClick={() => fetchChannelModelDetails(channel.channel_id, detail.data.length)}
+                                    disabled={detail.loadingMore}
+                                    className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-md border border-border hover:bg-muted transition-colors disabled:opacity-50"
+                                  >
+                                    {detail.loadingMore && <Loader2 className="h-3 w-3 animate-spin" />}
+                                    加载更多（{detail.data.length}/{detail.total}）
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          ) : (
+                            <div className="flex flex-col items-center justify-center py-6 text-center gap-1">
+                              <Inbox className="h-5 w-5 text-muted-foreground" />
+                              <div className="text-sm text-muted-foreground">该渠道暂无模型明细</div>
+                            </div>
+                          )}
                         </div>
                       )}
                     </CardContent>

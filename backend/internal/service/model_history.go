@@ -2,6 +2,7 @@ package service
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,8 @@ import (
 
 	_ "modernc.org/sqlite"
 )
+
+var ErrHistoryChannelModelDetailNotBuilt = errors.New("history channel model detail not built")
 
 // ModelHistoryService persists daily model-monitor snapshots into a local
 // SQLite database so historical (per-day, hour-level) metrics can be queried
@@ -214,10 +217,69 @@ func (s *ModelHistoryService) ensureSchema() error {
 			use_time_sum REAL NOT NULL DEFAULT 0,
 			PRIMARY KEY (date, channel_id, slot_idx)
 		)`,
+		`CREATE TABLE IF NOT EXISTS model_daily_channel_model (
+			date TEXT NOT NULL,
+			channel_id INTEGER NOT NULL,
+			model_name TEXT NOT NULL,
+			total_requests INTEGER NOT NULL DEFAULT 0,
+			success_count INTEGER NOT NULL DEFAULT 0,
+			failure_count INTEGER NOT NULL DEFAULT 0,
+			format_error_count INTEGER NOT NULL DEFAULT 0,
+			rate_limit_count INTEGER NOT NULL DEFAULT 0,
+			empty_count INTEGER NOT NULL DEFAULT 0,
+			timed_requests INTEGER NOT NULL DEFAULT 0,
+			within_5s INTEGER NOT NULL DEFAULT 0,
+			within_10s INTEGER NOT NULL DEFAULT 0,
+			duration_timed_requests INTEGER NOT NULL DEFAULT 0,
+			duration_within_10s INTEGER NOT NULL DEFAULT 0,
+			duration_within_20s INTEGER NOT NULL DEFAULT 0,
+			output_requests INTEGER NOT NULL DEFAULT 0,
+			claude_requests INTEGER NOT NULL DEFAULT 0,
+			cache_denominator_sum REAL NOT NULL DEFAULT 0,
+			cache_tokens_sum REAL NOT NULL DEFAULT 0,
+			cache_write_sum REAL NOT NULL DEFAULT 0,
+			cache_write_tokens_sum REAL NOT NULL DEFAULT 0,
+			input_tokens_sum REAL NOT NULL DEFAULT 0,
+			output_tokens_sum REAL NOT NULL DEFAULT 0,
+			completion_tokens_sum REAL NOT NULL DEFAULT 0,
+			use_time_sum REAL NOT NULL DEFAULT 0,
+			PRIMARY KEY (date, channel_id, model_name)
+		)`,
+		`CREATE TABLE IF NOT EXISTS channel_model_hourly_slot (
+			date TEXT NOT NULL,
+			channel_id INTEGER NOT NULL,
+			model_name TEXT NOT NULL,
+			slot_idx INTEGER NOT NULL,
+			total_requests INTEGER NOT NULL DEFAULT 0,
+			success_count INTEGER NOT NULL DEFAULT 0,
+			failure_count INTEGER NOT NULL DEFAULT 0,
+			format_error_count INTEGER NOT NULL DEFAULT 0,
+			rate_limit_count INTEGER NOT NULL DEFAULT 0,
+			empty_count INTEGER NOT NULL DEFAULT 0,
+			timed_requests INTEGER NOT NULL DEFAULT 0,
+			within_5s INTEGER NOT NULL DEFAULT 0,
+			within_10s INTEGER NOT NULL DEFAULT 0,
+			duration_timed_requests INTEGER NOT NULL DEFAULT 0,
+			duration_within_10s INTEGER NOT NULL DEFAULT 0,
+			duration_within_20s INTEGER NOT NULL DEFAULT 0,
+			output_requests INTEGER NOT NULL DEFAULT 0,
+			claude_requests INTEGER NOT NULL DEFAULT 0,
+			cache_denominator_sum REAL NOT NULL DEFAULT 0,
+			cache_tokens_sum REAL NOT NULL DEFAULT 0,
+			cache_write_sum REAL NOT NULL DEFAULT 0,
+			cache_write_tokens_sum REAL NOT NULL DEFAULT 0,
+			input_tokens_sum REAL NOT NULL DEFAULT 0,
+			output_tokens_sum REAL NOT NULL DEFAULT 0,
+			completion_tokens_sum REAL NOT NULL DEFAULT 0,
+			use_time_sum REAL NOT NULL DEFAULT 0,
+			PRIMARY KEY (date, channel_id, model_name, slot_idx)
+		)`,
 		`CREATE INDEX IF NOT EXISTS idx_daily_summary_date ON model_daily_summary(date)`,
 		`CREATE INDEX IF NOT EXISTS idx_hourly_slot_date_model ON model_hourly_slot(date, model_name)`,
 		`CREATE INDEX IF NOT EXISTS idx_daily_channel_date ON model_daily_channel(date)`,
 		`CREATE INDEX IF NOT EXISTS idx_channel_hourly_slot_date_channel ON channel_hourly_slot(date, channel_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_daily_channel_model_date_channel ON model_daily_channel_model(date, channel_id, total_requests DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_channel_model_hourly_date_channel_model ON channel_model_hourly_slot(date, channel_id, model_name)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -250,7 +312,7 @@ func (s *ModelHistoryService) ensureSchema() error {
 		{"completion_tokens_sum", "REAL NOT NULL DEFAULT 0"},
 		{"use_time_sum", "REAL NOT NULL DEFAULT 0"},
 	}
-	for _, table := range []string{"model_daily_summary", "model_hourly_slot", "model_daily_channel", "channel_hourly_slot"} {
+	for _, table := range []string{"model_daily_summary", "model_hourly_slot", "model_daily_channel", "channel_hourly_slot", "model_daily_channel_model", "channel_model_hourly_slot"} {
 		for _, col := range perfColumns {
 			if err := s.ensureColumn(table, col.name, col.definition); err != nil {
 				return err
@@ -329,13 +391,15 @@ func (s *ModelHistoryService) ListAvailableDates() ([]string, error) {
 // daySnapshot bundles everything aggregated for a single day before it is
 // written transactionally.
 type daySnapshot struct {
-	date     string
-	startTS  int64
-	models   map[string]*dailyPerfStats
-	slots    map[string]map[int]*slotCounts // model -> slotIdx -> counts
-	channels map[int64]*dailyPerfStats
-	chanSlot map[int64]map[int]*slotCounts // channel -> slotIdx -> counts
-	chanName map[int64]string
+	date            string
+	startTS         int64
+	models          map[string]*dailyPerfStats
+	slots           map[string]map[int]*slotCounts // model -> slotIdx -> counts
+	channels        map[int64]*dailyPerfStats
+	chanSlot        map[int64]map[int]*slotCounts // channel -> slotIdx -> counts
+	chanName        map[int64]string
+	channelModels   map[int64]map[string]*dailyPerfStats
+	chanModelSlot   map[int64]map[string]map[int]*slotCounts
 }
 
 type slotCounts struct {
@@ -373,7 +437,7 @@ func (s *ModelHistoryService) SaveDay(snap *daySnapshot) error {
 	}
 	defer tx.Rollback()
 
-	for _, table := range []string{"model_daily_summary", "model_hourly_slot", "model_daily_channel", "channel_hourly_slot"} {
+	for _, table := range []string{"model_daily_summary", "model_hourly_slot", "model_daily_channel", "channel_hourly_slot", "model_daily_channel_model", "channel_model_hourly_slot"} {
 		if _, err := tx.Exec(fmt.Sprintf("DELETE FROM %s WHERE date = ?", table), snap.date); err != nil {
 			return err
 		}
@@ -479,6 +543,62 @@ func (s *ModelHistoryService) SaveDay(snap *daySnapshot) error {
 				c.completionTokensSum, c.useTimeSum,
 			); err != nil {
 				return err
+			}
+		}
+	}
+
+	chanModelStmt, err := tx.Prepare(`INSERT INTO model_daily_channel_model (
+		date, channel_id, model_name, total_requests, success_count, failure_count, format_error_count, rate_limit_count, empty_count,
+		timed_requests, within_5s, within_10s,
+		duration_timed_requests, duration_within_10s, duration_within_20s, output_requests,
+		claude_requests, cache_denominator_sum, cache_tokens_sum, cache_write_sum,
+		cache_write_tokens_sum, input_tokens_sum, output_tokens_sum,
+		completion_tokens_sum, use_time_sum
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+	if err != nil {
+		return err
+	}
+	defer chanModelStmt.Close()
+	for channelID, models := range snap.channelModels {
+		for modelName, st := range models {
+			if _, err := chanModelStmt.Exec(
+				snap.date, channelID, modelName, st.totalRequests, st.successCount, st.failureCount, st.formatError, st.rateLimit, st.emptyCount,
+				st.timedRequests, st.within5s, st.within10s,
+				st.durationTimedRequests, st.durationWithin10s, st.durationWithin20s, st.outputRequests,
+				st.claudeRequests, st.cacheDenominatorSum, st.cacheTokensSum, st.cacheWriteSum,
+				st.cacheWriteTokensSum, st.inputTokensSum, st.outputTokensSum,
+				st.completionTokensSum, st.useTimeSum,
+			); err != nil {
+				return err
+			}
+		}
+	}
+
+	chanModelSlotStmt, err := tx.Prepare(`INSERT INTO channel_model_hourly_slot (
+		date, channel_id, model_name, slot_idx, total_requests, success_count, failure_count, format_error_count, rate_limit_count, empty_count,
+		timed_requests, within_5s, within_10s, duration_timed_requests,
+		duration_within_10s, duration_within_20s, output_requests, claude_requests,
+		cache_denominator_sum, cache_tokens_sum, cache_write_sum,
+		cache_write_tokens_sum, input_tokens_sum, output_tokens_sum,
+		completion_tokens_sum, use_time_sum
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+	if err != nil {
+		return err
+	}
+	defer chanModelSlotStmt.Close()
+	for channelID, models := range snap.chanModelSlot {
+		for modelName, slots := range models {
+			for idx, c := range slots {
+				if _, err := chanModelSlotStmt.Exec(
+					snap.date, channelID, modelName, idx, c.total, c.success, c.failure, c.formatError, c.rateLimit, c.empty,
+					c.timedRequests, c.within5s, c.within10s, c.durationTimedRequests,
+					c.durationWithin10s, c.durationWithin20s, c.outputRequests, c.claudeRequests,
+					c.cacheDenominatorSum, c.cacheTokensSum, c.cacheWriteSum,
+					c.cacheWriteTokensSum, c.inputTokensSum, c.outputTokensSum,
+					c.completionTokensSum, c.useTimeSum,
+				); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -715,6 +835,7 @@ func (s *ModelHistoryService) GetChannelPerformanceByDate(date string) ([]map[st
 		return nil, err
 	}
 
+	modelCounts := s.getChannelModelCounts(date)
 	results := make([]map[string]interface{}, 0, len(ordered))
 	for _, item := range ordered {
 		perf := perfSummaryFromDaily(item.st)
@@ -732,6 +853,7 @@ func (s *ModelHistoryService) GetChannelPerformanceByDate(date string) ([]map[st
 		results = append(results, map[string]interface{}{
 			"channel_id":               item.id,
 			"channel_name":             name,
+			"model_count":              modelCounts[item.id],
 			"total_requests":           item.st.totalRequests,
 			"success_count":            item.st.successCount,
 			"failure_count":            item.st.failureCount,
@@ -765,6 +887,227 @@ func (s *ModelHistoryService) GetChannelPerformanceByDate(date string) ([]map[st
 		})
 	}
 	return results, nil
+}
+
+func (s *ModelHistoryService) getChannelModelCounts(date string) map[int64]int {
+	rows, err := s.db.Query(`SELECT channel_id, COUNT(*)
+		FROM model_daily_channel_model WHERE date = ? GROUP BY channel_id`, date)
+	if err != nil {
+		return map[int64]int{}
+	}
+	defer rows.Close()
+
+	out := make(map[int64]int)
+	for rows.Next() {
+		var channelID int64
+		var count int
+		if err := rows.Scan(&channelID, &count); err != nil {
+			return map[int64]int{}
+		}
+		out[channelID] = count
+	}
+	if err := rows.Err(); err != nil {
+		return map[int64]int{}
+	}
+	return out
+}
+
+func (s *ModelHistoryService) getHistoryChannelName(date string, channelID int64) (string, bool, error) {
+	row := s.db.QueryRow(`SELECT channel_name FROM model_daily_channel WHERE date = ? AND channel_id = ?`, date, channelID)
+	var name string
+	if err := row.Scan(&name); err != nil {
+		if err == sql.ErrNoRows {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	if name == "" {
+		name = fmt.Sprintf("Channel#%d", channelID)
+	}
+	return name, true, nil
+}
+
+func (s *ModelHistoryService) getChannelModelSlots(date string, channelID int64, modelName string) map[int]*slotCounts {
+	rows, err := s.db.Query(`SELECT slot_idx, total_requests, success_count, failure_count, format_error_count, rate_limit_count, empty_count,
+		timed_requests, within_5s, within_10s, duration_timed_requests,
+		duration_within_10s, duration_within_20s, output_requests, claude_requests,
+		cache_denominator_sum, cache_tokens_sum, cache_write_sum,
+		cache_write_tokens_sum, input_tokens_sum, output_tokens_sum,
+		completion_tokens_sum, use_time_sum
+		FROM channel_model_hourly_slot WHERE date = ? AND channel_id = ? AND model_name = ?`, date, channelID, modelName)
+	if err != nil {
+		return map[int]*slotCounts{}
+	}
+	defer rows.Close()
+
+	out := make(map[int]*slotCounts)
+	for rows.Next() {
+		var idx int
+		c := &slotCounts{}
+		if err := rows.Scan(
+			&idx, &c.total, &c.success, &c.failure, &c.formatError, &c.rateLimit, &c.empty,
+			&c.timedRequests, &c.within5s, &c.within10s, &c.durationTimedRequests,
+			&c.durationWithin10s, &c.durationWithin20s, &c.outputRequests, &c.claudeRequests,
+			&c.cacheDenominatorSum, &c.cacheTokensSum, &c.cacheWriteSum,
+			&c.cacheWriteTokensSum, &c.inputTokensSum, &c.outputTokensSum,
+			&c.completionTokensSum, &c.useTimeSum,
+		); err != nil {
+			return map[int]*slotCounts{}
+		}
+		out[idx] = c
+	}
+	if err := rows.Err(); err != nil {
+		return map[int]*slotCounts{}
+	}
+	return out
+}
+
+func buildHistoryChannelModelResult(date string, channelID int64, channelName string, modelName string, st *dailyPerfStats, slots map[int]*slotCounts) map[string]interface{} {
+	if st == nil {
+		st = &dailyPerfStats{}
+	}
+	perf := perfSummaryFromDaily(st)
+	successRate := float64(100)
+	if st.totalRequests > 0 {
+		successRate = float64(st.successCount) / float64(st.totalRequests) * 100
+	}
+	rules := GetErrorRules()
+	modelRate := modelSuccessRate(st.successCount, st.totalRequests, st.formatError, st.rateLimit, rules)
+	modelStatus := getStatusColor(modelRate, modelAvailabilityDenominator(st.totalRequests, st.formatError, st.rateLimit, rules))
+
+	return map[string]interface{}{
+		"channel_id":               channelID,
+		"channel_name":             channelName,
+		"model_name":               modelName,
+		"display_name":             modelName,
+		"time_window":              "24h",
+		"date":                     date,
+		"total_requests":           st.totalRequests,
+		"success_count":            st.successCount,
+		"failure_count":            st.failureCount,
+		"format_error_count":       st.formatError,
+		"rate_limit_count":         st.rateLimit,
+		"non_format_failure_count": nonFormatFailureCount(st.failureCount, st.formatError),
+		"model_failure_count":      nonFormatFailureCount(st.failureCount, st.formatError),
+		"model_error_count":        nonFormatFailureCount(st.failureCount, st.formatError) + st.emptyCount,
+		"non_empty_count":          st.successCount,
+		"empty_count":              st.emptyCount,
+		"success_rate":             roundRate(successRate),
+		"model_success_rate":       roundRate(modelRate),
+		"model_availability_rate":  roundRate(modelRate),
+		"current_status":           getStatusColor(successRate, st.totalRequests),
+		"model_current_status":     modelStatus,
+		"within_5s_rate":           perf["within_5s_rate"],
+		"within_10s_rate":          perf["within_10s_rate"],
+		"duration_within_10s_rate": perf["duration_within_10s_rate"],
+		"duration_within_20s_rate": perf["duration_within_20s_rate"],
+		"cache_hit_rate":           perf["cache_hit_rate"],
+		"cache_write_rate":         perf["cache_write_rate"],
+		"cache_hit_tokens":         perf["cache_hit_tokens"],
+		"cache_write_tokens":       perf["cache_write_tokens"],
+		"total_input_tokens":       perf["total_input_tokens"],
+		"total_output_tokens":      perf["total_output_tokens"],
+		"completion_tps":           perf["completion_tps"],
+		"timed_requests":           perf["timed_requests"],
+		"duration_timed_requests":  perf["duration_timed_requests"],
+		"output_requests":          perf["output_requests"],
+		"slot_data":                buildAvailabilitySlotData(slots, dayStartTimestamp(date), historySlotSeconds, historySlotCount),
+	}
+}
+
+func (s *ModelHistoryService) GetChannelModelPerformanceByDate(date string, channelID int64, limit, offset int) (map[string]interface{}, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	channelName, channelFound, err := s.getHistoryChannelName(date, channelID)
+	if err != nil {
+		return nil, err
+	}
+	if !channelFound {
+		channelName = fmt.Sprintf("Channel#%d", channelID)
+		return map[string]interface{}{
+			"date":         date,
+			"time_window":  "24h",
+			"channel_id":   channelID,
+			"channel_name": channelName,
+			"total":        0,
+			"limit":        limit,
+			"offset":       offset,
+			"has_more":    false,
+			"data":         []map[string]interface{}{},
+		}, nil
+	}
+
+	var total int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM model_daily_channel_model WHERE date = ? AND channel_id = ?`, date, channelID).Scan(&total); err != nil {
+		return nil, err
+	}
+	if total == 0 {
+		return nil, ErrHistoryChannelModelDetailNotBuilt
+	}
+
+	rows, err := s.db.Query(`SELECT model_name, total_requests, success_count, failure_count, format_error_count, rate_limit_count, empty_count,
+		timed_requests, within_5s, within_10s, duration_timed_requests,
+		duration_within_10s, duration_within_20s, output_requests, claude_requests,
+		cache_denominator_sum, cache_tokens_sum, cache_write_sum,
+		cache_write_tokens_sum, input_tokens_sum, output_tokens_sum,
+		completion_tokens_sum, use_time_sum
+		FROM model_daily_channel_model
+		WHERE date = ? AND channel_id = ?
+		ORDER BY total_requests DESC, model_name ASC
+		LIMIT ? OFFSET ?`, date, channelID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	// 先把这一页的行读完并释放连接（SQLite MaxOpenConns=1），再逐个查 slot 明细，
+	// 否则在 rows 未关闭时对同一连接发起 getChannelModelSlots 会死锁。
+	type modelRow struct {
+		name string
+		st   *dailyPerfStats
+	}
+	ordered := make([]modelRow, 0)
+	for rows.Next() {
+		var modelName string
+		st := &dailyPerfStats{}
+		if err := rows.Scan(&modelName, &st.totalRequests, &st.successCount, &st.failureCount, &st.formatError, &st.rateLimit, &st.emptyCount, &st.timedRequests,
+			&st.within5s, &st.within10s, &st.durationTimedRequests, &st.durationWithin10s, &st.durationWithin20s,
+			&st.outputRequests, &st.claudeRequests, &st.cacheDenominatorSum, &st.cacheTokensSum, &st.cacheWriteSum,
+			&st.cacheWriteTokensSum, &st.inputTokensSum, &st.outputTokensSum,
+			&st.completionTokensSum, &st.useTimeSum); err != nil {
+			return nil, err
+		}
+		ordered = append(ordered, modelRow{name: modelName, st: st})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+
+	data := make([]map[string]interface{}, 0, len(ordered))
+	for _, item := range ordered {
+		data = append(data, buildHistoryChannelModelResult(date, channelID, channelName, item.name, item.st, s.getChannelModelSlots(date, channelID, item.name)))
+	}
+
+	return map[string]interface{}{
+		"date":         date,
+		"time_window":  "24h",
+		"channel_id":   channelID,
+		"channel_name": channelName,
+		"total":        total,
+		"limit":        limit,
+		"offset":       offset,
+		"has_more":    offset+len(data) < total,
+		"data":         data,
+	}, nil
 }
 
 func (s *ModelHistoryService) getChannelSlots(date string, channelID int64) map[int]*slotCounts {

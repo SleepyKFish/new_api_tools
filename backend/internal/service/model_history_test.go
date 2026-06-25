@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"os"
 	"sync"
 	"testing"
@@ -122,6 +123,50 @@ func TestModelHistoryRoundTrip(t *testing.T) {
 			},
 		},
 		chanName: map[int64]string{7: "primary"},
+		channelModels: map[int64]map[string]*dailyPerfStats{
+			7: {
+				"gpt-4": {
+					totalRequests:       9,
+					successCount:        7,
+					failureCount:        1,
+					formatError:         1,
+					emptyCount:          1,
+					timedRequests:       9,
+					within5s:            5,
+					outputRequests:      9,
+					completionTokensSum: 900,
+					useTimeSum:          300,
+				},
+			},
+		},
+		chanModelSlot: map[int64]map[string]map[int]*slotCounts{
+			7: {
+				"gpt-4": {
+					0: {
+						total:                 4,
+						success:               3,
+						failure:               1,
+						formatError:           1,
+						empty:                 0,
+						timedRequests:         3,
+						within5s:              2,
+						durationTimedRequests: 3,
+						durationWithin10s:     2,
+						outputRequests:        3,
+						claudeRequests:        1,
+						cacheDenominatorSum:   100,
+						cacheTokensSum:        25,
+						cacheWriteSum:         10,
+						cacheWriteTokensSum:   10,
+						inputTokensSum:        100,
+						outputTokensSum:       150,
+						completionTokensSum:   150,
+						useTimeSum:            50,
+					},
+					13: {total: 5, success: 4, failure: 0, empty: 1},
+				},
+			},
+		},
 	}
 
 	if err := hist.SaveDay(snap); err != nil {
@@ -204,6 +249,9 @@ func TestModelHistoryRoundTrip(t *testing.T) {
 	if chans[0]["channel_name"] != "primary" {
 		t.Fatalf("channel name wrong: %v", chans[0])
 	}
+	if chans[0]["model_count"].(int) != 1 {
+		t.Fatalf("channel model_count wrong: %v", chans[0]["model_count"])
+	}
 	if chans[0]["total_requests"].(int64) != 9 {
 		t.Fatalf("channel total_requests wrong: %v", chans[0]["total_requests"])
 	}
@@ -236,6 +284,25 @@ func TestModelHistoryRoundTrip(t *testing.T) {
 		t.Fatalf("channel slot13 wrong: %v", channelSlotData[13])
 	}
 
+	detail, err := hist.GetChannelModelPerformanceByDate(date, 7, 100, 0)
+	if err != nil {
+		t.Fatalf("GetChannelModelPerformanceByDate failed: %v", err)
+	}
+	if detail["total"].(int) != 1 || detail["has_more"].(bool) {
+		t.Fatalf("channel model detail paging wrong: %v", detail)
+	}
+	modelDetails := detail["data"].([]map[string]interface{})
+	if len(modelDetails) != 1 || modelDetails[0]["model_name"] != "gpt-4" {
+		t.Fatalf("channel model detail data wrong: %v", modelDetails)
+	}
+	if modelDetails[0]["channel_name"] != "primary" || modelDetails[0]["total_requests"].(int64) != 9 {
+		t.Fatalf("channel model detail summary wrong: %v", modelDetails[0])
+	}
+	detailSlots := modelDetails[0]["slot_data"].([]map[string]interface{})
+	if len(detailSlots) != historySlotCount || detailSlots[0]["total_requests"].(int64) != 4 {
+		t.Fatalf("channel model detail slots wrong: %v", detailSlots)
+	}
+
 	// Idempotent re-save: same date should replace, not duplicate.
 	if err := hist.SaveDay(snap); err != nil {
 		t.Fatalf("re-SaveDay failed: %v", err)
@@ -243,6 +310,50 @@ func TestModelHistoryRoundTrip(t *testing.T) {
 	dates2, _ := hist.ListAvailableDates()
 	if len(dates2) != 1 {
 		t.Fatalf("re-save duplicated dates: %v", dates2)
+	}
+}
+
+func TestModelHistoryChannelModelDetailNotBuilt(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("DATA_DIR", dir)
+	os.Setenv("SQL_DSN", "user:pass@tcp(localhost:3306)/db")
+	defer os.Unsetenv("DATA_DIR")
+	defer os.Unsetenv("SQL_DSN")
+	config.Load()
+	resetHistorySingleton()
+
+	hist, err := GetModelHistoryService()
+	if err != nil {
+		t.Fatalf("GetModelHistoryService failed: %v", err)
+	}
+	defer func() {
+		hist.Close()
+		resetHistorySingleton()
+	}()
+
+	const date = "2026-06-09"
+	snap := &daySnapshot{
+		date:    date,
+		startTS: dayStartTimestamp(date),
+		models: map[string]*dailyPerfStats{
+			"gpt-4": {totalRequests: 1, successCount: 1},
+		},
+		slots: map[string]map[int]*slotCounts{
+			"gpt-4": {0: {total: 1, success: 1}},
+		},
+		channels: map[int64]*dailyPerfStats{
+			7: {totalRequests: 1, successCount: 1},
+		},
+		chanSlot: map[int64]map[int]*slotCounts{
+			7: {0: {total: 1, success: 1}},
+		},
+		chanName: map[int64]string{7: "legacy"},
+	}
+	if err := hist.SaveDay(snap); err != nil {
+		t.Fatalf("SaveDay failed: %v", err)
+	}
+	if _, err := hist.GetChannelModelPerformanceByDate(date, 7, 100, 0); !errors.Is(err, ErrHistoryChannelModelDetailNotBuilt) {
+		t.Fatalf("expected ErrHistoryChannelModelDetailNotBuilt, got %v", err)
 	}
 }
 
