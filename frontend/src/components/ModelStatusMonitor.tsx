@@ -634,6 +634,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
   const intervalDropdownRef = useRef<HTMLDivElement>(null)
   const windowDropdownRef = useRef<HTMLDivElement>(null)
   const themeDropdownRef = useRef<HTMLDivElement>(null)
+  const modelCardsSectionRef = useRef<HTMLDivElement>(null)
 
   const apiUrl = import.meta.env.VITE_API_URL || ''
 
@@ -1082,6 +1083,12 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
     }
   }, [apiUrl, getApiPrefix, getAuthHeaders, isHistory, selectedDate, timeWindow, isEmbed, showToast])
 
+  const scrollToModelCards = useCallback(() => {
+    window.requestAnimationFrame(() => {
+      modelCardsSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    })
+  }, [])
+
   const handleChannelToggle = useCallback((channel: ChannelPerformance) => {
     if (expandedChannelId === channel.channel_id) {
       setExpandedChannelId(null)
@@ -1092,7 +1099,8 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
     if (!detail || (detail.data.length === 0 && !detail.loading && !detail.error)) {
       fetchChannelModelDetails(channel.channel_id, 0)
     }
-  }, [expandedChannelId, channelModelDetails, fetchChannelModelDetails])
+    scrollToModelCards()
+  }, [expandedChannelId, channelModelDetails, fetchChannelModelDetails, scrollToModelCards])
 
   // 时间窗口 / 历史日期 / 实时与历史模式切换时，已展开的渠道明细会失效，需折叠并清空缓存。
   useEffect(() => {
@@ -1280,6 +1288,18 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
     () => channelSummaries.filter(channel => channel.total_requests > 0),
     [channelSummaries]
   )
+  const activeChannelDetail = useMemo(
+    () => activeChannelSummaries.find(channel => channel.channel_id === expandedChannelId),
+    [activeChannelSummaries, expandedChannelId]
+  )
+  const activeChannelDetailState = expandedChannelId !== null
+    ? channelModelDetails[expandedChannelId]
+    : undefined
+  const channelDetailModels = useMemo(
+    () => (activeChannelDetailState?.data || []).filter(model => model.total_requests > 0),
+    [activeChannelDetailState]
+  )
+  const isChannelDetailMode = Boolean(activeChannelDetail)
 
   // Handle group filter change
   const handleGroupFilterChange = useCallback((gid: string) => {
@@ -2087,10 +2107,16 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                     : ''
 
                 const isExpanded = expandedChannelId === channel.channel_id
-                const detail = channelModelDetails[channel.channel_id]
 
                 return (
-                  <Card key={channel.channel_id} className={cn("border border-border/60 shadow-none", cardStatusClass)}>
+                  <Card
+                    key={channel.channel_id}
+                    className={cn(
+                      "border border-border/60 shadow-none",
+                      cardStatusClass,
+                      isExpanded && "ring-1 ring-primary/30 border-primary/40 bg-primary/[0.02]"
+                    )}
+                  >
                     <CardContent className="p-3.5">
                       <div
                         className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1 cursor-pointer select-none"
@@ -2105,7 +2131,10 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                         }}
                       >
                         <div className="min-w-0">
-                          <div className="flex items-center gap-1.5 pl-6 min-h-5">
+                          <div className="flex flex-wrap items-center gap-1.5 pl-6 min-h-5">
+                            <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-5 flex-shrink-0 font-normal">
+                              渠道 ID {channel.channel_id}
+                            </Badge>
                             <Badge
                               variant={status === 'green' ? 'success' : status === 'yellow' ? 'warning' : 'destructive'}
                               className="text-[10px] px-1.5 py-0 h-5 flex-shrink-0"
@@ -2164,59 +2193,6 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                           <StatusSlotBar slots={channel.slot_data} />
                         </div>
                       )}
-
-                      {isExpanded && (
-                        <div className="mt-3 pt-3 border-t border-border/60">
-                          {detail?.loading ? (
-                            <div className="flex items-center justify-center py-6 text-sm text-muted-foreground">
-                              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                              加载模型明细…
-                            </div>
-                          ) : detail?.detailNotBuilt ? (
-                            <div className="flex flex-col items-center justify-center py-6 text-center gap-1">
-                              <Inbox className="h-5 w-5 text-muted-foreground" />
-                              <div className="text-sm text-muted-foreground">
-                                {detail.error || '该日期尚未生成渠道模型明细，请先回填历史快照'}
-                              </div>
-                            </div>
-                          ) : detail?.error ? (
-                            <div className="flex flex-col items-center justify-center py-6 text-center gap-2">
-                              <div className="text-sm text-red-600 dark:text-red-400">{detail.error}</div>
-                              <button
-                                onClick={() => fetchChannelModelDetails(channel.channel_id, 0)}
-                                className="text-xs px-2.5 py-1 rounded-md border border-border hover:bg-muted transition-colors"
-                              >
-                                重试
-                              </button>
-                            </div>
-                          ) : detail && detail.data.length > 0 ? (
-                            <div className="space-y-3">
-                              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                {detail.data.map((model) => (
-                                  <ModelStatusCard key={`${channel.channel_id}-${model.model_name}`} model={model} />
-                                ))}
-                              </div>
-                              {detail.has_more && (
-                                <div className="flex justify-center">
-                                  <button
-                                    onClick={() => fetchChannelModelDetails(channel.channel_id, detail.data.length)}
-                                    disabled={detail.loadingMore}
-                                    className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-md border border-border hover:bg-muted transition-colors disabled:opacity-50"
-                                  >
-                                    {detail.loadingMore && <Loader2 className="h-3 w-3 animate-spin" />}
-                                    加载更多（{detail.data.length}/{detail.total}）
-                                  </button>
-                                </div>
-                              )}
-                            </div>
-                          ) : (
-                            <div className="flex flex-col items-center justify-center py-6 text-center gap-1">
-                              <Inbox className="h-5 w-5 text-muted-foreground" />
-                              <div className="text-sm text-muted-foreground">该渠道暂无模型明细</div>
-                            </div>
-                          )}
-                        </div>
-                      )}
                     </CardContent>
                   </Card>
                 )
@@ -2226,126 +2202,287 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
         </Card>
       )}
 
-      {/* Group Filter + Status Filter */}
-      {modelStatuses.length > 0 && (
-        <div className="space-y-3">
-          {/* Model Group Filter */}
-          <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-hide">
-            <Tag className="h-4 w-4 text-muted-foreground flex-shrink-0" />
-            <button
-              onClick={() => handleGroupFilterChange('all')}
-              className={cn(
-                "inline-flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-full border transition-all whitespace-nowrap flex-shrink-0",
-                groupFilter === 'all'
-                  ? "bg-primary text-primary-foreground border-primary shadow-sm"
-                  : "bg-background hover:bg-muted border-border text-muted-foreground hover:text-foreground"
-              )}
-            >
-              全部
-              <span className={cn("text-xs tabular-nums", groupFilter === 'all' ? "opacity-80" : "text-muted-foreground")}>
-                {groupCounts.all}
-              </span>
-            </button>
-            {customGroups.map((group, index) => {
-              const color = GROUP_COLORS[index % GROUP_COLORS.length]
-              const isActive = groupFilter === group.id
-              const count = groupCounts[group.id] || 0
-              return (
-                <button
-                  key={group.id}
-                  onClick={() => handleGroupFilterChange(group.id)}
-                  className={cn(
-                    "inline-flex items-center gap-2 px-3.5 py-2 text-sm font-medium rounded-full border transition-all whitespace-nowrap flex-shrink-0",
-                    isActive
-                      ? cn("bg-gradient-to-r shadow-sm border", color)
-                      : "bg-background hover:bg-muted border-border text-muted-foreground hover:text-foreground"
-                  )}
-                >
-                  {(() => {
-                    if (group.icon) {
-                      const iconOpt = GROUP_ICON_OPTIONS.find(o => o.key === group.icon)
-                      if (iconOpt) {
-                        const IconComp = iconOpt.component
-                        return <IconComp size={16} className="flex-shrink-0" />
-                      }
-                    }
-                    return <Layers size={14} className="flex-shrink-0" />
-                  })()}
-                  {group.name}
-                  <span className={cn("text-xs tabular-nums", isActive ? "opacity-80" : "text-muted-foreground")}>
-                    {count}
-                  </span>
-                </button>
-              )
-            })}
-            {/* Token Groups Separator + Tabs */}
-            {tokenGroups.length > 0 && (customGroups.length > 0 ? (
-              <div className="w-px h-5 bg-border flex-shrink-0 mx-1" />
-            ) : null)}
-            {tokenGroups.map((tg) => {
-              const filterId = `token:${tg.group_name}`
-              const isActive = groupFilter === filterId
-              const count = groupCounts[filterId] || 0
-              return (
-                <button
-                  key={filterId}
-                  onClick={() => handleGroupFilterChange(filterId)}
-                  className={cn(
-                    "inline-flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-full border transition-all whitespace-nowrap flex-shrink-0",
-                    isActive
-                      ? "bg-blue-500/15 text-blue-700 dark:text-blue-400 border-blue-500/30 shadow-sm"
-                      : "bg-background hover:bg-muted border-border text-muted-foreground hover:text-foreground"
-                  )}
-                >
-                  <KeyRound size={13} className="flex-shrink-0" />
-                  {tg.group_name}
-                  <span className={cn("text-xs tabular-nums", isActive ? "opacity-80" : "text-muted-foreground")}>
-                    {count}
-                  </span>
-                </button>
-              )
-            })}
-            {/* Add Group Button */}
-            <button
-              onClick={() => setShowGroupManager(true)}
-              className="inline-flex items-center gap-1 px-2.5 py-1.5 text-sm rounded-full border border-dashed border-border text-muted-foreground hover:text-foreground hover:border-primary/50 hover:bg-muted transition-all whitespace-nowrap flex-shrink-0"
-            >
-              <Settings2 size={13} />
-              管理分组
-            </button>
-          </div>
-
-          {/* Status Filter Tabs */}
-          <div className="flex items-center gap-2">
-            <Filter className="h-4 w-4 text-muted-foreground" />
-            {[
-              { value: 'all' as StatusFilter, label: '全部', count: modelStatuses.length },
-              { value: 'green' as StatusFilter, label: '正常', count: statusCounts.green, color: 'text-green-600' },
-              { value: 'yellow' as StatusFilter, label: '警告', count: statusCounts.yellow, color: 'text-yellow-600' },
-              { value: 'red' as StatusFilter, label: '异常', count: statusCounts.red, color: 'text-red-600' },
-            ].map(tab => (
+      <div ref={modelCardsSectionRef} className="scroll-mt-4 space-y-3">
+        {/* Group Filter + Status Filter */}
+        {!isChannelDetailMode && modelStatuses.length > 0 && (
+          <div className="space-y-3">
+            {/* Model Group Filter */}
+            <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-hide">
+              <Tag className="h-4 w-4 text-muted-foreground flex-shrink-0" />
               <button
-                key={tab.value}
-                onClick={() => setStatusFilter(tab.value)}
+                onClick={() => handleGroupFilterChange('all')}
                 className={cn(
-                  "px-3 py-1.5 text-sm rounded-md transition-all",
-                  statusFilter === tab.value
-                    ? "bg-primary text-primary-foreground shadow-sm"
-                    : "hover:bg-muted text-muted-foreground hover:text-foreground"
+                  "inline-flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-full border transition-all whitespace-nowrap flex-shrink-0",
+                  groupFilter === 'all'
+                    ? "bg-primary text-primary-foreground border-primary shadow-sm"
+                    : "bg-background hover:bg-muted border-border text-muted-foreground hover:text-foreground"
                 )}
               >
-                {tab.label}
-                <span className={cn(
-                  "ml-1.5 text-xs tabular-nums",
-                  statusFilter === tab.value ? "opacity-80" : (tab.color || "")
-                )}>
-                  {tab.count}
+                全部
+                <span className={cn("text-xs tabular-nums", groupFilter === 'all' ? "opacity-80" : "text-muted-foreground")}>
+                  {groupCounts.all}
                 </span>
               </button>
+              {customGroups.map((group, index) => {
+                const color = GROUP_COLORS[index % GROUP_COLORS.length]
+                const isActive = groupFilter === group.id
+                const count = groupCounts[group.id] || 0
+                return (
+                  <button
+                    key={group.id}
+                    onClick={() => handleGroupFilterChange(group.id)}
+                    className={cn(
+                      "inline-flex items-center gap-2 px-3.5 py-2 text-sm font-medium rounded-full border transition-all whitespace-nowrap flex-shrink-0",
+                      isActive
+                        ? cn("bg-gradient-to-r shadow-sm border", color)
+                        : "bg-background hover:bg-muted border-border text-muted-foreground hover:text-foreground"
+                    )}
+                  >
+                    {(() => {
+                      if (group.icon) {
+                        const iconOpt = GROUP_ICON_OPTIONS.find(o => o.key === group.icon)
+                        if (iconOpt) {
+                          const IconComp = iconOpt.component
+                          return <IconComp size={16} className="flex-shrink-0" />
+                        }
+                      }
+                      return <Layers size={14} className="flex-shrink-0" />
+                    })()}
+                    {group.name}
+                    <span className={cn("text-xs tabular-nums", isActive ? "opacity-80" : "text-muted-foreground")}>
+                      {count}
+                    </span>
+                  </button>
+                )
+              })}
+              {/* Token Groups Separator + Tabs */}
+              {tokenGroups.length > 0 && (customGroups.length > 0 ? (
+                <div className="w-px h-5 bg-border flex-shrink-0 mx-1" />
+              ) : null)}
+              {tokenGroups.map((tg) => {
+                const filterId = `token:${tg.group_name}`
+                const isActive = groupFilter === filterId
+                const count = groupCounts[filterId] || 0
+                return (
+                  <button
+                    key={filterId}
+                    onClick={() => handleGroupFilterChange(filterId)}
+                    className={cn(
+                      "inline-flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-full border transition-all whitespace-nowrap flex-shrink-0",
+                      isActive
+                        ? "bg-blue-500/15 text-blue-700 dark:text-blue-400 border-blue-500/30 shadow-sm"
+                        : "bg-background hover:bg-muted border-border text-muted-foreground hover:text-foreground"
+                    )}
+                  >
+                    <KeyRound size={13} className="flex-shrink-0" />
+                    {tg.group_name}
+                    <span className={cn("text-xs tabular-nums", isActive ? "opacity-80" : "text-muted-foreground")}>
+                      {count}
+                    </span>
+                  </button>
+                )
+              })}
+              {/* Add Group Button */}
+              <button
+                onClick={() => setShowGroupManager(true)}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 text-sm rounded-full border border-dashed border-border text-muted-foreground hover:text-foreground hover:border-primary/50 hover:bg-muted transition-all whitespace-nowrap flex-shrink-0"
+              >
+                <Settings2 size={13} />
+                管理分组
+              </button>
+            </div>
+
+            {/* Status Filter Tabs */}
+            <div className="flex items-center gap-2">
+              <Filter className="h-4 w-4 text-muted-foreground" />
+              {[
+                { value: 'all' as StatusFilter, label: '全部', count: modelStatuses.length },
+                { value: 'green' as StatusFilter, label: '正常', count: statusCounts.green, color: 'text-green-600' },
+                { value: 'yellow' as StatusFilter, label: '警告', count: statusCounts.yellow, color: 'text-yellow-600' },
+                { value: 'red' as StatusFilter, label: '异常', count: statusCounts.red, color: 'text-red-600' },
+              ].map(tab => (
+                <button
+                  key={tab.value}
+                  onClick={() => setStatusFilter(tab.value)}
+                  className={cn(
+                    "px-3 py-1.5 text-sm rounded-md transition-all",
+                    statusFilter === tab.value
+                      ? "bg-primary text-primary-foreground shadow-sm"
+                      : "hover:bg-muted text-muted-foreground hover:text-foreground"
+                  )}
+                >
+                  {tab.label}
+                  <span className={cn(
+                    "ml-1.5 text-xs tabular-nums",
+                    statusFilter === tab.value ? "opacity-80" : (tab.color || "")
+                  )}>
+                    {tab.count}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {isChannelDetailMode && activeChannelDetail && (
+          <Card className="border-primary/20 bg-primary/[0.02] shadow-none">
+            <CardContent className="px-4 py-3">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <Badge variant="outline" className="font-normal">渠道 ID {activeChannelDetail.channel_id}</Badge>
+                    <Badge
+                      variant={getDisplayStatus(activeChannelDetail) === 'green' ? 'success' : getDisplayStatus(activeChannelDetail) === 'yellow' ? 'warning' : 'destructive'}
+                      className="text-[10px] px-1.5 py-0 h-5"
+                    >
+                      {STATUS_LABELS[getDisplayStatus(activeChannelDetail)]}
+                    </Badge>
+                  </div>
+                  <div className="mt-1.5 text-sm font-medium truncate" title={activeChannelDetail.channel_name}>
+                    {activeChannelDetail.channel_name}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-muted-foreground tabular-nums">
+                    {activeChannelDetailState?.loading
+                      ? '加载模型明细…'
+                      : `${channelDetailModels.length}/${activeChannelDetailState?.total ?? activeChannelDetail.model_count ?? channelDetailModels.length} 个模型`}
+                  </span>
+                  <Button variant="outline" size="sm" onClick={() => setExpandedChannelId(null)}>
+                    返回全部模型
+                  </Button>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Model Status Cards */}
+        {isChannelDetailMode ? (
+          activeChannelDetailState?.loading ? (
+            <Card>
+              <CardContent className="py-12 text-center text-muted-foreground">
+                <Loader2 className="h-5 w-5 mx-auto mb-2 animate-spin" />
+                <p>加载模型明细…</p>
+              </CardContent>
+            </Card>
+          ) : activeChannelDetailState?.detailNotBuilt ? (
+            <Card>
+              <CardContent className="py-12 text-center text-muted-foreground">
+                <Inbox className="h-5 w-5 mx-auto mb-2" />
+                <p>{activeChannelDetailState.error || '该日期尚未生成渠道模型明细，请先回填历史快照'}</p>
+              </CardContent>
+            </Card>
+          ) : activeChannelDetailState?.error ? (
+            <Card>
+              <CardContent className="py-12 text-center space-y-3">
+                <p className="text-sm text-red-600 dark:text-red-400">{activeChannelDetailState.error}</p>
+                {activeChannelDetail && (
+                  <Button variant="outline" size="sm" onClick={() => fetchChannelModelDetails(activeChannelDetail.channel_id, 0)}>
+                    重试
+                  </Button>
+                )}
+              </CardContent>
+            </Card>
+          ) : channelDetailModels.length > 0 && activeChannelDetail ? (
+            <div className="space-y-3">
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                {channelDetailModels.map(model => (
+                  <ModelStatusCard
+                    key={`${activeChannelDetail.channel_id}-${model.model_name}`}
+                    model={model}
+                    channelId={activeChannelDetail.channel_id}
+                  />
+                ))}
+              </div>
+              {activeChannelDetailState?.has_more && (
+                <div className="flex justify-center">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => fetchChannelModelDetails(activeChannelDetail.channel_id, activeChannelDetailState.data.length)}
+                    disabled={activeChannelDetailState.loadingMore}
+                  >
+                    {activeChannelDetailState.loadingMore && <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />}
+                    加载更多（{activeChannelDetailState.data.length}/{activeChannelDetailState.total}）
+                  </Button>
+                </div>
+              )}
+            </div>
+          ) : (
+            <Card>
+              <CardContent className="py-12 text-center text-muted-foreground">
+                <Inbox className="h-5 w-5 mx-auto mb-2" />
+                <p>该渠道暂无模型明细</p>
+              </CardContent>
+            </Card>
+          )
+        ) : sortedModelStatuses.length > 0 ? (
+          <DndContext
+            sensors={sensors}
+            collisionDetection={closestCenter}
+            onDragEnd={handleDragEnd}
+          >
+            <SortableContext
+              items={sortedModelStatuses.map(m => m.model_name)}
+              strategy={rectSortingStrategy}
+            >
+              <div key={statusFilter} className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                {sortedModelStatuses.map(model => (
+                  <SortableModelCard key={model.model_name} model={model} />
+                ))}
+              </div>
+            </SortableContext>
+          </DndContext>
+        ) : initialLoading ? (
+          /* Skeleton cards during initial loading transition */
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+            {[0, 1, 2, 3].map(i => (
+              <Card key={i} className="overflow-hidden">
+                <div className="px-4 pt-3 pb-3 animate-in fade-in-0 duration-500" style={{ animationDelay: `${i * 150}ms` }}>
+                  <div className="flex items-center gap-2 mb-2.5">
+                    <div className="w-6 h-6 rounded-md bg-muted animate-pulse" />
+                    <div className="h-4 bg-muted animate-pulse rounded-md" style={{ width: `${120 + i * 30}px` }} />
+                    <div className="h-5 w-12 bg-muted animate-pulse rounded-full" />
+                    <div className="ml-auto flex items-center gap-1">
+                      <div className="h-4 w-10 bg-muted animate-pulse rounded-md" />
+                      <div className="h-4 w-14 bg-muted animate-pulse rounded-md" />
+                    </div>
+                  </div>
+                  <div className="flex gap-[3px]">
+                    {Array.from({ length: 24 }).map((_, j) => (
+                      <div
+                        key={j}
+                        className={cn(
+                          "flex-1 h-5 bg-muted animate-pulse",
+                          j === 0 ? "rounded-l-md rounded-r-sm" :
+                            j === 23 ? "rounded-r-md rounded-l-sm" : "rounded-sm"
+                        )}
+                        style={{ animationDelay: `${(i * 150) + (j * 20)}ms` }}
+                      />
+                    ))}
+                  </div>
+                  <div className="flex justify-between mt-1.5">
+                    <div className="h-3 w-10 bg-muted animate-pulse rounded" />
+                    <div className="h-3 w-10 bg-muted animate-pulse rounded" />
+                    <div className="h-3 w-8 bg-muted animate-pulse rounded" />
+                  </div>
+                </div>
+              </Card>
             ))}
           </div>
-        </div>
-      )}
+        ) : (
+          <Card>
+            <CardContent className="py-12 text-center text-muted-foreground">
+              {selectedModels.length === 0 ? (
+                <p>请选择要监控的模型</p>
+              ) : (
+                <p>暂无模型状态数据</p>
+              )}
+            </CardContent>
+          </Card>
+        )}
+      </div>
 
       {/* Group Manager Modal */}
       {showGroupManager && (
@@ -2379,73 +2516,6 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
             }
           }}
         />
-      )}
-
-      {/* Model Status Cards */}
-      {sortedModelStatuses.length > 0 ? (
-        <DndContext
-          sensors={sensors}
-          collisionDetection={closestCenter}
-          onDragEnd={handleDragEnd}
-        >
-          <SortableContext
-            items={sortedModelStatuses.map(m => m.model_name)}
-            strategy={rectSortingStrategy}
-          >
-            <div key={statusFilter} className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-              {sortedModelStatuses.map(model => (
-                <SortableModelCard key={model.model_name} model={model} />
-              ))}
-            </div>
-          </SortableContext>
-        </DndContext>
-      ) : initialLoading ? (
-        /* Skeleton cards during initial loading transition */
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-          {[0, 1, 2, 3].map(i => (
-            <Card key={i} className="overflow-hidden">
-              <div className="px-4 pt-3 pb-3 animate-in fade-in-0 duration-500" style={{ animationDelay: `${i * 150}ms` }}>
-                <div className="flex items-center gap-2 mb-2.5">
-                  <div className="w-6 h-6 rounded-md bg-muted animate-pulse" />
-                  <div className="h-4 bg-muted animate-pulse rounded-md" style={{ width: `${120 + i * 30}px` }} />
-                  <div className="h-5 w-12 bg-muted animate-pulse rounded-full" />
-                  <div className="ml-auto flex items-center gap-1">
-                    <div className="h-4 w-10 bg-muted animate-pulse rounded-md" />
-                    <div className="h-4 w-14 bg-muted animate-pulse rounded-md" />
-                  </div>
-                </div>
-                <div className="flex gap-[3px]">
-                  {Array.from({ length: 24 }).map((_, j) => (
-                    <div
-                      key={j}
-                      className={cn(
-                        "flex-1 h-5 bg-muted animate-pulse",
-                        j === 0 ? "rounded-l-md rounded-r-sm" :
-                          j === 23 ? "rounded-r-md rounded-l-sm" : "rounded-sm"
-                      )}
-                      style={{ animationDelay: `${(i * 150) + (j * 20)}ms` }}
-                    />
-                  ))}
-                </div>
-                <div className="flex justify-between mt-1.5">
-                  <div className="h-3 w-10 bg-muted animate-pulse rounded" />
-                  <div className="h-3 w-10 bg-muted animate-pulse rounded" />
-                  <div className="h-3 w-8 bg-muted animate-pulse rounded" />
-                </div>
-              </div>
-            </Card>
-          ))}
-        </div>
-      ) : (
-        <Card>
-          <CardContent className="py-12 text-center text-muted-foreground">
-            {selectedModels.length === 0 ? (
-              <p>请选择要监控的模型</p>
-            ) : (
-              <p>暂无模型状态数据</p>
-            )}
-          </CardContent>
-        </Card>
       )}
 
       {/* Legend */}
@@ -2986,6 +3056,7 @@ function ErrorRulesDialog({
 interface ModelStatusCardProps {
   model: ModelStatus
   isDraggable?: boolean
+  channelId?: number
 }
 
 // Sortable wrapper for ModelStatusCard
@@ -3553,7 +3624,7 @@ function StatusSlotBar({
   )
 }
 
-function ModelStatusCard({ model, isDraggable }: ModelStatusCardProps) {
+function ModelStatusCard({ model, isDraggable, channelId }: ModelStatusCardProps) {
   const status = getDisplayStatus(model)
 
   // Success rate color based on status
@@ -3582,12 +3653,20 @@ function ModelStatusCard({ model, isDraggable }: ModelStatusCardProps) {
       cardStatusClass
     )}>
       <div className="px-4 pt-3 pb-3">
+        {typeof channelId === 'number' && (
+          <div className="mb-2 flex items-center">
+            <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-5 font-normal">
+              渠道 ID {channelId}
+            </Badge>
+          </div>
+        )}
+
         {/* Header row: logo + name + badge + stats */}
         <div className="flex items-center gap-2 mb-2.5" title={isDraggable ? '拖拽卡片排序' : undefined}>
           <div className="flex items-center justify-center w-6 h-6 rounded-md bg-muted/50 flex-shrink-0">
             <ModelLogo modelName={model.model_name} size={16} />
           </div>
-          <span className="text-sm font-medium leading-5 truncate" title={model.model_name}>
+          <span className="text-sm font-medium leading-5 truncate min-w-0" title={model.model_name}>
             {model.model_name}
           </span>
           <Badge
