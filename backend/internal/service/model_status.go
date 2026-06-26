@@ -650,16 +650,72 @@ func inputTokensFromLog(promptTokens, cacheTokens, cacheWriteTokens float64, isC
 	return math.Max(promptTokens, cacheTokens)
 }
 
-func accumulatePerformanceRow(stats *performanceStats, row map[string]interface{}) {
-	if stats == nil || toInt64(row["type"]) != 2 {
-		return
+// rowMetrics 是一条日志解析一次后的全部派生结果,供多个维度桶(模型/渠道/渠道模型
+// 的可用性与性能)共享累加,避免单次扫描内对同一行重复解析 other JSON、重复计算派生量。
+// 可用性字段语义对齐 accumulateMetrics,性能字段对齐 accumulatePerformanceMetrics。
+type rowMetrics struct {
+	valid     bool  // type ∈ {2,5}
+	createdAt int64 // 用于定位 slot
+
+	// 可用性维度
+	isSuccess   bool   // type==2 && completion>0
+	isFailure   bool   // type==5
+	isEmpty     bool   // type==2 && completion==0
+	errorBucket string // 仅 type==5: ErrorBucketUserFormat / ErrorBucketRateLimit / ""
+
+	// 性能维度(仅 type==2 有意义;isPerf 对应旧 successRequests 的自增条件)
+	isPerf                bool
+	timedRequests         int64
+	within5s              int64
+	within10s             int64
+	durationTimedRequests int64
+	durationWithin10s     int64
+	durationWithin20s     int64
+	outputRequests        int64
+	claudeRequests        int64
+	cacheDenominatorSum   float64
+	cacheTokensSum        float64
+	cacheWriteSum         float64
+	cacheWriteTokensSum   float64
+	inputTokensSum        float64
+	outputTokensSum       float64
+	completionTokensSum   float64
+	useTimeSum            float64
+}
+
+// computeRowMetrics 解析一条 row(含 other JSON)一次,产出所有派生指标。
+// 这是各扫描路径(实时模型/渠道/渠道模型、历史每日聚合)共享的唯一解析入口。
+func computeRowMetrics(row map[string]interface{}, rules ErrorRuleConfig) rowMetrics {
+	logType := toInt64(row["type"])
+	if logType != 2 && logType != 5 {
+		return rowMetrics{}
 	}
 
-	stats.successRequests++
+	m := rowMetrics{
+		valid:     true,
+		createdAt: toInt64(row["created_at"]),
+	}
 
+	completion := toFloat64(row["completion_tokens"])
+	switch {
+	case logType == 2 && completion > 0:
+		m.isSuccess = true
+	case logType == 5:
+		m.isFailure = true
+		m.errorBucket = rules.classifyOtherJSON(parseOtherJSON(row["other"]))
+	case logType == 2 && completion == 0:
+		m.isEmpty = true
+	}
+
+	if logType != 2 {
+		return m
+	}
+
+	// --- 性能维度(仅 type==2)---
+	m.isPerf = true
 	useTime := toFloat64(row["use_time"])
 	promptTokens := toFloat64(row["prompt_tokens"])
-	completionTokens := toFloat64(row["completion_tokens"])
+	completionTokens := completion
 	isStream := toBool(row["is_stream"])
 	other := parseOtherJSON(row["other"])
 	frtSeconds := toFloat64(other["frt"]) / 1000.0
@@ -669,22 +725,22 @@ func accumulatePerformanceRow(stats *performanceStats, row map[string]interface{
 		firstTokenTime = frtSeconds
 	}
 	if firstTokenTime > 0 {
-		stats.timedRequests++
+		m.timedRequests++
 		if firstTokenTime <= 5 {
-			stats.within5s++
+			m.within5s++
 		}
 		if firstTokenTime <= 10 {
-			stats.within10s++
+			m.within10s++
 		}
 	}
 
 	if useTime > 0 {
-		stats.durationTimedRequests++
+		m.durationTimedRequests++
 		if useTime <= 10 {
-			stats.durationWithin10s++
+			m.durationWithin10s++
 		}
 		if useTime <= 20 {
-			stats.durationWithin20s++
+			m.durationWithin20s++
 		}
 	}
 
@@ -693,34 +749,36 @@ func accumulatePerformanceRow(stats *performanceStats, row map[string]interface{
 		if isStream && frtSeconds > 0 {
 			effectiveTime = math.Max(useTime-frtSeconds, 1)
 		}
-		stats.outputRequests++
-		stats.completionTokensSum += completionTokens
-		stats.useTimeSum += effectiveTime
+		m.outputRequests++
+		m.completionTokensSum += completionTokens
+		m.useTimeSum += effectiveTime
 	}
 
 	cacheTokens := toFloat64(other["cache_tokens"])
 	if cacheTokens > 0 {
-		stats.cacheTokensSum += cacheTokens
+		m.cacheTokensSum += cacheTokens
 	}
 	cacheWriteTokens := cacheWriteTokensFromOther(other)
 	if cacheWriteTokens > 0 {
-		stats.cacheWriteTokensSum += cacheWriteTokens
+		m.cacheWriteTokensSum += cacheWriteTokens
 	}
 	isClaude := isClaudeMessagesRequest(other)
 	if inputTokens := inputTokensFromLog(promptTokens, cacheTokens, cacheWriteTokens, isClaude, other); inputTokens > 0 {
-		stats.inputTokensSum += inputTokens
+		m.inputTokensSum += inputTokens
 	}
 	if completionTokens > 0 {
-		stats.outputTokensSum += completionTokens
+		m.outputTokensSum += completionTokens
 	}
 	if isClaude {
 		// 与 SQL 路径保持一致: Claude 分母 = prompt + 缓存读 + 缓存写
-		stats.cacheDenominatorSum += promptTokens + cacheTokens + cacheWriteTokens
-		stats.cacheWriteSum += cacheWriteTokens
-		stats.claudeRequests++
+		m.cacheDenominatorSum += promptTokens + cacheTokens + cacheWriteTokens
+		m.cacheWriteSum += cacheWriteTokens
+		m.claudeRequests++
 	} else {
-		stats.cacheDenominatorSum += math.Max(promptTokens, cacheTokens)
+		m.cacheDenominatorSum += math.Max(promptTokens, cacheTokens)
 	}
+
+	return m
 }
 
 type availabilityStats struct {
@@ -737,17 +795,14 @@ func newAvailabilityStats() *availabilityStats {
 	return &availabilityStats{slots: make(map[int]*slotCounts)}
 }
 
-func (s *availabilityStats) accumulate(row map[string]interface{}, startTime int64, slotSeconds int64, numSlots int, rules ErrorRuleConfig) {
-	if s == nil {
-		return
-	}
-	logType := toInt64(row["type"])
-	if logType != 2 && logType != 5 {
+// accumulateMetrics 用预解析的 rowMetrics 累加可用性统计。
+// 派生量已在 computeRowMetrics 里算好,这里只做廉价累加,不再触碰 other JSON。
+func (s *availabilityStats) accumulateMetrics(m rowMetrics, startTime, slotSeconds int64, numSlots int) {
+	if s == nil || !m.valid {
 		return
 	}
 
-	createdAt := toInt64(row["created_at"])
-	slotIdx := int((createdAt - startTime) / slotSeconds)
+	slotIdx := int((m.createdAt - startTime) / slotSeconds)
 	if slotIdx < 0 {
 		slotIdx = 0
 	}
@@ -761,19 +816,17 @@ func (s *availabilityStats) accumulate(row map[string]interface{}, startTime int
 		s.slots[slotIdx] = counts
 	}
 
-	completion := toFloat64(row["completion_tokens"])
 	s.totalRequests++
 	counts.total++
 
 	switch {
-	case logType == 2 && completion > 0:
+	case m.isSuccess:
 		s.successCount++
 		counts.success++
-	case logType == 5:
+	case m.isFailure:
 		s.failureCount++
 		counts.failure++
-		bucket := rules.classifyOtherJSON(parseOtherJSON(row["other"]))
-		switch bucket {
+		switch m.errorBucket {
 		case ErrorBucketUserFormat:
 			s.formatError++
 			counts.formatError++
@@ -781,13 +834,86 @@ func (s *availabilityStats) accumulate(row map[string]interface{}, startTime int
 			s.rateLimit++
 			counts.rateLimit++
 		}
-	case logType == 2 && completion == 0:
+	case m.isEmpty:
 		s.emptyCount++
 		counts.empty++
 	}
-	if logType == 2 {
-		accumulateSlotPerformance(counts, row)
+	if m.isPerf {
+		addSlotPerformanceMetrics(counts, m)
 	}
+}
+
+// addSlotPerformanceMetrics 把 rowMetrics 的性能派生量累加进 slotCounts。
+// 适用于实时与历史两条 slot 路径。
+func addSlotPerformanceMetrics(slot *slotCounts, m rowMetrics) {
+	if slot == nil {
+		return
+	}
+	slot.timedRequests += m.timedRequests
+	slot.within5s += m.within5s
+	slot.within10s += m.within10s
+	slot.durationTimedRequests += m.durationTimedRequests
+	slot.durationWithin10s += m.durationWithin10s
+	slot.durationWithin20s += m.durationWithin20s
+	slot.outputRequests += m.outputRequests
+	slot.claudeRequests += m.claudeRequests
+	slot.cacheDenominatorSum += m.cacheDenominatorSum
+	slot.cacheTokensSum += m.cacheTokensSum
+	slot.cacheWriteSum += m.cacheWriteSum
+	slot.cacheWriteTokensSum += m.cacheWriteTokensSum
+	slot.inputTokensSum += m.inputTokensSum
+	slot.outputTokensSum += m.outputTokensSum
+	slot.completionTokensSum += m.completionTokensSum
+	slot.useTimeSum += m.useTimeSum
+}
+
+// accumulatePerformanceMetrics 把 rowMetrics 累加进 performanceStats。
+// successRequests 对所有 type==2 日志自增(即 m.isPerf),与可用性的 successCount 区分。
+func accumulatePerformanceMetrics(stats *performanceStats, m rowMetrics) {
+	if stats == nil || !m.isPerf {
+		return
+	}
+	stats.successRequests++
+	stats.timedRequests += m.timedRequests
+	stats.within5s += m.within5s
+	stats.within10s += m.within10s
+	stats.durationTimedRequests += m.durationTimedRequests
+	stats.durationWithin10s += m.durationWithin10s
+	stats.durationWithin20s += m.durationWithin20s
+	stats.outputRequests += m.outputRequests
+	stats.claudeRequests += m.claudeRequests
+	stats.cacheDenominatorSum += m.cacheDenominatorSum
+	stats.cacheTokensSum += m.cacheTokensSum
+	stats.cacheWriteSum += m.cacheWriteSum
+	stats.cacheWriteTokensSum += m.cacheWriteTokensSum
+	stats.inputTokensSum += m.inputTokensSum
+	stats.outputTokensSum += m.outputTokensSum
+	stats.completionTokensSum += m.completionTokensSum
+	stats.useTimeSum += m.useTimeSum
+}
+
+// accumulateDailyMetrics 把 rowMetrics 的性能派生量累加进 dailyPerfStats。
+// 只动性能累加器,可用性计数由 accumulateDayRow 负责。
+func accumulateDailyMetrics(stats *dailyPerfStats, m rowMetrics) {
+	if stats == nil || !m.isPerf {
+		return
+	}
+	stats.timedRequests += m.timedRequests
+	stats.within5s += m.within5s
+	stats.within10s += m.within10s
+	stats.durationTimedRequests += m.durationTimedRequests
+	stats.durationWithin10s += m.durationWithin10s
+	stats.durationWithin20s += m.durationWithin20s
+	stats.outputRequests += m.outputRequests
+	stats.claudeRequests += m.claudeRequests
+	stats.cacheDenominatorSum += m.cacheDenominatorSum
+	stats.cacheTokensSum += m.cacheTokensSum
+	stats.cacheWriteSum += m.cacheWriteSum
+	stats.cacheWriteTokensSum += m.cacheWriteTokensSum
+	stats.inputTokensSum += m.inputTokensSum
+	stats.outputTokensSum += m.outputTokensSum
+	stats.completionTokensSum += m.completionTokensSum
+	stats.useTimeSum += m.useTimeSum
 }
 
 func buildAvailabilitySlotData(slots map[int]*slotCounts, startTime int64, slotSeconds int64, numSlots int) []map[string]interface{} {
@@ -934,7 +1060,12 @@ func (s *ModelStatusService) fetchPerformanceLogBatch(startTime, now, cursorCrea
 		ORDER BY created_at ASC, id ASC
 		LIMIT ?`, s.performanceLogColumns(), modelFilter))
 
-	return s.db.Query(query, args...)
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+
+	return rows, nil
 }
 
 func (s *ModelStatusService) getChannelNameMap(channelIDs []int64) map[int64]string {
@@ -988,6 +1119,7 @@ func (s *ModelStatusService) getModelPerformanceMap(modelNames []string, startTi
 		statsByModel[modelName] = &performanceStats{}
 	}
 
+	rules := GetErrorRules()
 	cursorCreatedAt := startTime - 1
 	cursorID := int64(0)
 	for {
@@ -998,7 +1130,7 @@ func (s *ModelStatusService) getModelPerformanceMap(modelNames []string, startTi
 		for _, row := range rows {
 			modelName := toString(row["model_name"])
 			if stats, ok := statsByModel[modelName]; ok {
-				accumulatePerformanceRow(stats, row)
+				accumulatePerformanceMetrics(stats, computeRowMetrics(row, rules))
 			}
 		}
 		lastRow := rows[len(rows)-1]
@@ -1057,10 +1189,14 @@ func (s *ModelStatusService) aggregateRealtimePerformance(modelNames []string, s
 		}
 
 		for _, row := range rows {
+			m := computeRowMetrics(row, rules)
+			if !m.valid {
+				continue
+			}
 			modelName := toString(row["model_name"])
 			if selectedModels[modelName] {
-				agg.modelAvailability[modelName].accumulate(row, startTime, slotSeconds, numSlots, rules)
-				accumulatePerformanceRow(agg.modelPerformance[modelName], row)
+				agg.modelAvailability[modelName].accumulateMetrics(m, startTime, slotSeconds, numSlots)
+				accumulatePerformanceMetrics(agg.modelPerformance[modelName], m)
 			}
 
 			channelID := toInt64(row["channel_id"])
@@ -1069,16 +1205,16 @@ func (s *ModelStatusService) aggregateRealtimePerformance(modelNames []string, s
 				channelAvailability = newAvailabilityStats()
 				agg.channelAvailability[channelID] = channelAvailability
 			}
-			channelAvailability.accumulate(row, startTime, slotSeconds, numSlots, rules)
+			channelAvailability.accumulateMetrics(m, startTime, slotSeconds, numSlots)
 
 			channelPerformance := agg.channelPerformance[channelID]
 			if channelPerformance == nil {
 				channelPerformance = &performanceStats{}
 				agg.channelPerformance[channelID] = channelPerformance
 			}
-			accumulatePerformanceRow(channelPerformance, row)
+			accumulatePerformanceMetrics(channelPerformance, m)
 
-			s.accumulateChannelModelRealtimeRow(agg.channelModelAvailability, agg.channelModelPerformance, row, startTime, slotSeconds, numSlots, rules)
+			s.accumulateChannelModelRealtimeRow(agg.channelModelAvailability, agg.channelModelPerformance, row, m, startTime, slotSeconds, numSlots)
 		}
 
 		lastRow := rows[len(rows)-1]
@@ -1096,10 +1232,10 @@ func (s *ModelStatusService) accumulateChannelModelRealtimeRow(
 	availabilityByChannelModel map[int64]map[string]*availabilityStats,
 	statsByChannelModel map[int64]map[string]*performanceStats,
 	row map[string]interface{},
+	m rowMetrics,
 	startTime int64,
 	slotSeconds int64,
 	numSlots int,
-	rules ErrorRuleConfig,
 ) {
 	modelName := toString(row["model_name"])
 	if modelName == "" {
@@ -1117,7 +1253,7 @@ func (s *ModelStatusService) accumulateChannelModelRealtimeRow(
 		availability = newAvailabilityStats()
 		modelAvailability[modelName] = availability
 	}
-	availability.accumulate(row, startTime, slotSeconds, numSlots, rules)
+	availability.accumulateMetrics(m, startTime, slotSeconds, numSlots)
 
 	modelStats := statsByChannelModel[channelID]
 	if modelStats == nil {
@@ -1129,7 +1265,7 @@ func (s *ModelStatusService) accumulateChannelModelRealtimeRow(
 		stats = &performanceStats{}
 		modelStats[modelName] = stats
 	}
-	accumulatePerformanceRow(stats, row)
+	accumulatePerformanceMetrics(stats, m)
 }
 
 func buildModelPerformanceResult(modelName, window string, availability *availabilityStats, perfStats *performanceStats, startTime int64, slotSeconds int64, numSlots int, rules ErrorRuleConfig) map[string]interface{} {
@@ -1464,22 +1600,26 @@ func (s *ModelStatusService) GetChannelPerformanceSummaries(window string, useCa
 			break
 		}
 		for _, row := range rows {
+			m := computeRowMetrics(row, rules)
+			if !m.valid {
+				continue
+			}
 			channelID := toInt64(row["channel_id"])
 			availability := availabilityByChannel[channelID]
 			if availability == nil {
 				availability = newAvailabilityStats()
 				availabilityByChannel[channelID] = availability
 			}
-			availability.accumulate(row, startTime, slotSeconds, numSlots, rules)
+			availability.accumulateMetrics(m, startTime, slotSeconds, numSlots)
 
 			stats := statsByChannel[channelID]
 			if stats == nil {
 				stats = &performanceStats{}
 				statsByChannel[channelID] = stats
 			}
-			accumulatePerformanceRow(stats, row)
+			accumulatePerformanceMetrics(stats, m)
 
-			s.accumulateChannelModelRealtimeRow(availabilityByChannelModel, statsByChannelModel, row, startTime, slotSeconds, numSlots, rules)
+			s.accumulateChannelModelRealtimeRow(availabilityByChannelModel, statsByChannelModel, row, m, startTime, slotSeconds, numSlots)
 		}
 		lastRow := rows[len(rows)-1]
 		cursorCreatedAt = toInt64(lastRow["created_at"])
@@ -2210,19 +2350,13 @@ func (s *ModelStatusService) AggregateDay(date string) error {
 // accumulateDayRow folds a single log row into both the per-model and
 // per-channel accumulators of the snapshot.
 func (s *ModelStatusService) accumulateDayRow(snap *daySnapshot, row map[string]interface{}, startTime int64, rules ErrorRuleConfig) {
-	logType := toInt64(row["type"])
-	if logType != 2 && logType != 5 {
+	m := computeRowMetrics(row, rules)
+	if !m.valid {
 		return
 	}
 	modelName := toString(row["model_name"])
-	createdAt := toInt64(row["created_at"])
-	completion := toFloat64(row["completion_tokens"])
 	channelID := toInt64(row["channel_id"])
-	errorBucket := ""
-	if logType == 5 {
-		errorBucket = rules.classifyOtherJSON(parseOtherJSON(row["other"]))
-	}
-	slotIdx := int((createdAt - startTime) / historySlotSeconds)
+	slotIdx := int((m.createdAt - startTime) / historySlotSeconds)
 	if slotIdx < 0 {
 		slotIdx = 0
 	}
@@ -2252,13 +2386,13 @@ func (s *ModelStatusService) accumulateDayRow(snap *daySnapshot, row map[string]
 		mstat.totalRequests++
 
 		switch {
-		case logType == 2 && completion > 0:
+		case m.isSuccess:
 			c.success++
 			mstat.successCount++
-		case logType == 5:
+		case m.isFailure:
 			c.failure++
 			mstat.failureCount++
-			switch errorBucket {
+			switch m.errorBucket {
 			case ErrorBucketUserFormat:
 				c.formatError++
 				mstat.formatError++
@@ -2266,7 +2400,7 @@ func (s *ModelStatusService) accumulateDayRow(snap *daySnapshot, row map[string]
 				c.rateLimit++
 				mstat.rateLimit++
 			}
-		case logType == 2 && completion == 0:
+		case m.isEmpty:
 			c.empty++
 			mstat.emptyCount++
 		}
@@ -2305,13 +2439,13 @@ func (s *ModelStatusService) accumulateDayRow(snap *daySnapshot, row map[string]
 		chanModelStat.totalRequests++
 		chanModelSlot.total++
 		switch {
-		case logType == 2 && completion > 0:
+		case m.isSuccess:
 			chanModelStat.successCount++
 			chanModelSlot.success++
-		case logType == 5:
+		case m.isFailure:
 			chanModelStat.failureCount++
 			chanModelSlot.failure++
-			switch errorBucket {
+			switch m.errorBucket {
 			case ErrorBucketUserFormat:
 				chanModelStat.formatError++
 				chanModelSlot.formatError++
@@ -2319,7 +2453,7 @@ func (s *ModelStatusService) accumulateDayRow(snap *daySnapshot, row map[string]
 				chanModelStat.rateLimit++
 				chanModelSlot.rateLimit++
 			}
-		case logType == 2 && completion == 0:
+		case m.isEmpty:
 			chanModelStat.emptyCount++
 			chanModelSlot.empty++
 		}
@@ -2343,13 +2477,13 @@ func (s *ModelStatusService) accumulateDayRow(snap *daySnapshot, row map[string]
 	chSlot.total++
 	chStat.totalRequests++
 	switch {
-	case logType == 2 && completion > 0:
+	case m.isSuccess:
 		chStat.successCount++
 		chSlot.success++
-	case logType == 5:
+	case m.isFailure:
 		chStat.failureCount++
 		chSlot.failure++
-		switch errorBucket {
+		switch m.errorBucket {
 		case ErrorBucketUserFormat:
 			chStat.formatError++
 			chSlot.formatError++
@@ -2357,119 +2491,21 @@ func (s *ModelStatusService) accumulateDayRow(snap *daySnapshot, row map[string]
 			chStat.rateLimit++
 			chSlot.rateLimit++
 		}
-	case logType == 2 && completion == 0:
+	case m.isEmpty:
 		chStat.emptyCount++
 		chSlot.empty++
 	}
 
 	// --- Performance accumulators (type=2 only, mirrors live path) ---
-	if logType != 2 {
+	if !m.isPerf {
 		return
 	}
 	if modelName != "" {
-		accumulateDailyPerformance(snap.models[modelName], row)
-		accumulateSlotPerformance(snap.slots[modelName][slotIdx], row)
-		accumulateDailyPerformance(chanModelStat, row)
-		accumulateSlotPerformance(chanModelSlot, row)
+		accumulateDailyMetrics(snap.models[modelName], m)
+		addSlotPerformanceMetrics(snap.slots[modelName][slotIdx], m)
+		accumulateDailyMetrics(chanModelStat, m)
+		addSlotPerformanceMetrics(chanModelSlot, m)
 	}
-	accumulateDailyPerformance(chStat, row)
-	accumulateSlotPerformance(chSlot, row)
-}
-
-func accumulateSlotPerformance(slot *slotCounts, row map[string]interface{}) {
-	if slot == nil {
-		return
-	}
-	stats := &dailyPerfStats{}
-	accumulateDailyPerformance(stats, row)
-	slot.timedRequests += stats.timedRequests
-	slot.within5s += stats.within5s
-	slot.within10s += stats.within10s
-	slot.durationTimedRequests += stats.durationTimedRequests
-	slot.durationWithin10s += stats.durationWithin10s
-	slot.durationWithin20s += stats.durationWithin20s
-	slot.outputRequests += stats.outputRequests
-	slot.claudeRequests += stats.claudeRequests
-	slot.cacheDenominatorSum += stats.cacheDenominatorSum
-	slot.cacheTokensSum += stats.cacheTokensSum
-	slot.cacheWriteSum += stats.cacheWriteSum
-	slot.cacheWriteTokensSum += stats.cacheWriteTokensSum
-	slot.inputTokensSum += stats.inputTokensSum
-	slot.outputTokensSum += stats.outputTokensSum
-	slot.completionTokensSum += stats.completionTokensSum
-	slot.useTimeSum += stats.useTimeSum
-}
-
-// accumulateDailyPerformance mirrors accumulatePerformanceRow but folds into a
-// dailyPerfStats (which additionally carries availability counters). It only
-// touches the performance accumulators; availability counters are handled by
-// the caller. Assumes the row is a type=2 log.
-func accumulateDailyPerformance(stats *dailyPerfStats, row map[string]interface{}) {
-	if stats == nil {
-		return
-	}
-
-	useTime := toFloat64(row["use_time"])
-	promptTokens := toFloat64(row["prompt_tokens"])
-	completionTokens := toFloat64(row["completion_tokens"])
-	isStream := toBool(row["is_stream"])
-	other := parseOtherJSON(row["other"])
-	frtSeconds := toFloat64(other["frt"]) / 1000.0
-
-	firstTokenTime := useTime
-	if isStream && frtSeconds > 0 {
-		firstTokenTime = frtSeconds
-	}
-	if firstTokenTime > 0 {
-		stats.timedRequests++
-		if firstTokenTime <= 5 {
-			stats.within5s++
-		}
-		if firstTokenTime <= 10 {
-			stats.within10s++
-		}
-	}
-
-	if useTime > 0 {
-		stats.durationTimedRequests++
-		if useTime <= 10 {
-			stats.durationWithin10s++
-		}
-		if useTime <= 20 {
-			stats.durationWithin20s++
-		}
-	}
-
-	if completionTokens > 0 && useTime > 0 {
-		effectiveTime := useTime
-		if isStream && frtSeconds > 0 {
-			effectiveTime = math.Max(useTime-frtSeconds, 1)
-		}
-		stats.outputRequests++
-		stats.completionTokensSum += completionTokens
-		stats.useTimeSum += effectiveTime
-	}
-
-	cacheTokens := toFloat64(other["cache_tokens"])
-	if cacheTokens > 0 {
-		stats.cacheTokensSum += cacheTokens
-	}
-	cacheWriteTokens := cacheWriteTokensFromOther(other)
-	if cacheWriteTokens > 0 {
-		stats.cacheWriteTokensSum += cacheWriteTokens
-	}
-	isClaude := isClaudeMessagesRequest(other)
-	if inputTokens := inputTokensFromLog(promptTokens, cacheTokens, cacheWriteTokens, isClaude, other); inputTokens > 0 {
-		stats.inputTokensSum += inputTokens
-	}
-	if completionTokens > 0 {
-		stats.outputTokensSum += completionTokens
-	}
-	if isClaude {
-		stats.cacheDenominatorSum += promptTokens + cacheTokens + cacheWriteTokens
-		stats.cacheWriteSum += cacheWriteTokens
-		stats.claudeRequests++
-	} else {
-		stats.cacheDenominatorSum += math.Max(promptTokens, cacheTokens)
-	}
+	accumulateDailyMetrics(chStat, m)
+	addSlotPerformanceMetrics(chSlot, m)
 }
