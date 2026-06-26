@@ -2131,7 +2131,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                         }}
                       >
                         <div className="min-w-0">
-                          <div className="flex flex-wrap items-center gap-1.5 pl-6 min-h-5">
+                          <div className="flex flex-wrap items-center gap-1.5 min-h-5">
                             <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-5 flex-shrink-0 font-normal">
                               渠道 ID {channel.channel_id}
                             </Badge>
@@ -2148,12 +2148,6 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                             )}
                           </div>
                           <div className="flex items-center gap-2 mt-1 min-w-0">
-                            <ChevronDown
-                              className={cn(
-                                "h-4 w-4 flex-shrink-0 text-muted-foreground transition-transform",
-                                isExpanded ? "" : "-rotate-90"
-                              )}
-                            />
                             <div className="text-sm font-medium leading-5 truncate" title={channel.channel_name}>
                               {channel.channel_name}
                             </div>
@@ -3653,14 +3647,6 @@ function ModelStatusCard({ model, isDraggable, channelId }: ModelStatusCardProps
       cardStatusClass
     )}>
       <div className="px-4 pt-3 pb-3">
-        {typeof channelId === 'number' && (
-          <div className="mb-2 flex items-center">
-            <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-5 font-normal">
-              渠道 ID {channelId}
-            </Badge>
-          </div>
-        )}
-
         {/* Header row: logo + name + badge + stats */}
         <div className="flex items-center gap-2 mb-2.5" title={isDraggable ? '拖拽卡片排序' : undefined}>
           <div className="flex items-center justify-center w-6 h-6 rounded-md bg-muted/50 flex-shrink-0">
@@ -3669,6 +3655,11 @@ function ModelStatusCard({ model, isDraggable, channelId }: ModelStatusCardProps
           <span className="text-sm font-medium leading-5 truncate min-w-0" title={model.model_name}>
             {model.model_name}
           </span>
+          {typeof channelId === 'number' && (
+            <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-5 flex-shrink-0 font-normal">
+              #{channelId}
+            </Badge>
+          )}
           <Badge
             variant={status === 'green' ? 'success' : status === 'yellow' ? 'warning' : 'destructive'}
             className="text-[10px] px-1.5 py-0 h-5 flex-shrink-0"
