@@ -2093,7 +2093,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                   <Card key={channel.channel_id} className={cn("border border-border/60 shadow-none", cardStatusClass)}>
                     <CardContent className="p-3.5">
                       <div
-                        className="flex items-center gap-2 cursor-pointer select-none"
+                        className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1 cursor-pointer select-none"
                         onClick={() => handleChannelToggle(channel)}
                         role="button"
                         tabIndex={0}
@@ -2104,26 +2104,32 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                           }
                         }}
                       >
-                        <ChevronDown
-                          className={cn(
-                            "h-4 w-4 flex-shrink-0 text-muted-foreground transition-transform",
-                            isExpanded ? "" : "-rotate-90"
-                          )}
-                        />
-                        <div className="text-sm font-medium leading-5 truncate" title={channel.channel_name}>
-                          {channel.channel_name}
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5 pl-6 min-h-5">
+                            <Badge
+                              variant={status === 'green' ? 'success' : status === 'yellow' ? 'warning' : 'destructive'}
+                              className="text-[10px] px-1.5 py-0 h-5 flex-shrink-0"
+                            >
+                              {STATUS_LABELS[status]}
+                            </Badge>
+                            {typeof channel.model_count === 'number' && channel.model_count > 0 && (
+                              <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-5 flex-shrink-0 font-normal">
+                                {channel.model_count} 个模型
+                              </Badge>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-2 mt-1 min-w-0">
+                            <ChevronDown
+                              className={cn(
+                                "h-4 w-4 flex-shrink-0 text-muted-foreground transition-transform",
+                                isExpanded ? "" : "-rotate-90"
+                              )}
+                            />
+                            <div className="text-sm font-medium leading-5 truncate" title={channel.channel_name}>
+                              {channel.channel_name}
+                            </div>
+                          </div>
                         </div>
-                        {typeof channel.model_count === 'number' && channel.model_count > 0 && (
-                          <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-5 flex-shrink-0 font-normal">
-                            {channel.model_count} 个模型
-                          </Badge>
-                        )}
-                        <Badge
-                          variant={status === 'green' ? 'success' : status === 'yellow' ? 'warning' : 'destructive'}
-                          className="text-[10px] px-1.5 py-0 h-5 flex-shrink-0"
-                        >
-                          {STATUS_LABELS[status]}
-                        </Badge>
                         <TopStackedStats
                           successCount={channel.success_count}
                           successClassName={status === 'green' ? 'text-green-600 dark:text-green-400' :
