@@ -127,6 +127,29 @@ func GetAvailableModels(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": data})
 }
 
+func parsePerformanceTimeRange(c *gin.Context) (int64, int64, bool, error) {
+	startRaw := c.Query("start_time")
+	endRaw := c.Query("end_time")
+	if startRaw == "" && endRaw == "" {
+		return 0, 0, false, nil
+	}
+	if startRaw == "" || endRaw == "" {
+		return 0, 0, false, errors.New("start_time and end_time must be provided together")
+	}
+	startTime, err := strconv.ParseInt(startRaw, 10, 64)
+	if err != nil {
+		return 0, 0, false, errors.New("invalid start_time")
+	}
+	endTime, err := strconv.ParseInt(endRaw, 10, 64)
+	if err != nil {
+		return 0, 0, false, errors.New("invalid end_time")
+	}
+	if err := service.ValidatePerformanceTimeRange(startTime, endTime); err != nil {
+		return 0, 0, false, err
+	}
+	return startTime, endTime, true, nil
+}
+
 // POST /performance/summary
 func GetRealtimePerformanceSummary(c *gin.Context) {
 	var modelNames []string
@@ -137,9 +160,20 @@ func GetRealtimePerformanceSummary(c *gin.Context) {
 	window := c.DefaultQuery("window", service.DefaultTimeWindow)
 	noCacheParam := c.DefaultQuery("no_cache", "false")
 	noCache := noCacheParam == "true" || noCacheParam == "1"
+	startTime, endTime, hasRange, rangeErr := parsePerformanceTimeRange(c)
+	if rangeErr != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResp("INVALID_PARAMS", rangeErr.Error(), ""))
+		return
+	}
 
 	svc := service.NewModelStatusService()
-	data, err := svc.GetRealtimePerformanceSummary(modelNames, window, !noCache)
+	var data map[string]interface{}
+	var err error
+	if hasRange {
+		data, err = svc.GetPerformanceSummaryByRange(modelNames, startTime, endTime, !noCache)
+	} else {
+		data, err = svc.GetRealtimePerformanceSummary(modelNames, window, !noCache)
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResp("QUERY_ERROR", err.Error(), ""))
 		return
@@ -157,19 +191,36 @@ func GetChannelPerformanceSummaries(c *gin.Context) {
 	window := c.DefaultQuery("window", service.DefaultTimeWindow)
 	noCacheParam := c.DefaultQuery("no_cache", "false")
 	noCache := noCacheParam == "true" || noCacheParam == "1"
+	startTime, endTime, hasRange, rangeErr := parsePerformanceTimeRange(c)
+	if rangeErr != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResp("INVALID_PARAMS", rangeErr.Error(), ""))
+		return
+	}
 
 	svc := service.NewModelStatusService()
-	data, err := svc.GetChannelPerformanceSummaries(window, !noCache)
+	var data []map[string]interface{}
+	var err error
+	if hasRange {
+		data, err = svc.GetChannelPerformanceSummariesByRange(startTime, endTime, !noCache)
+	} else {
+		data, err = svc.GetChannelPerformanceSummaries(window, !noCache)
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResp("QUERY_ERROR", err.Error(), ""))
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
+	response := gin.H{
 		"success":     true,
 		"data":        data,
 		"time_window": service.NormalizeTimeWindow(window),
 		"cache_ttl":   60,
-	})
+	}
+	if hasRange {
+		response["time_window"] = "custom"
+		response["start_time"] = startTime
+		response["end_time"] = endTime
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func parseLimitOffset(c *gin.Context) (int, int) {
@@ -214,9 +265,20 @@ func GetChannelModelPerformance(c *gin.Context) {
 	}
 	window := c.DefaultQuery("window", service.DefaultTimeWindow)
 	limit, offset := parseLimitOffset(c)
+	startTime, endTime, hasRange, rangeErr := parsePerformanceTimeRange(c)
+	if rangeErr != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResp("INVALID_PARAMS", rangeErr.Error(), ""))
+		return
+	}
 
 	svc := service.NewModelStatusService()
-	data, err := svc.GetChannelModelPerformance(channelID, window, limit, offset)
+	var data map[string]interface{}
+	var err error
+	if hasRange {
+		data, err = svc.GetChannelModelPerformanceByRange(channelID, startTime, endTime, limit, offset)
+	} else {
+		data, err = svc.GetChannelModelPerformance(channelID, window, limit, offset)
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResp("QUERY_ERROR", err.Error(), ""))
 		return

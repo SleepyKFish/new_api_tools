@@ -354,6 +354,15 @@ const TIME_WINDOWS = [
 
 type CustomWindowUnit = 'min' | 'h'
 
+interface FixedTimeRange {
+  date: string
+  start: string
+  end: string
+  startTimestamp: number
+  endTimestamp: number
+  crossesMidnight: boolean
+}
+
 function getTimeWindowLabel(value: string): string {
   const preset = TIME_WINDOWS.find(w => w.value === value)
   if (preset) return preset.label
@@ -368,6 +377,52 @@ function parseTimeWindowForCustomInput(value: string): { amount: string; unit: C
   const match = value.match(/^(\d+)(min|m|h)$/)
   if (!match) return { amount: '45', unit: 'min' }
   return { amount: match[1], unit: match[2] === 'h' ? 'h' : 'min' }
+}
+
+function formatLocalDateKey(date: Date): string {
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, '0'),
+    String(date.getDate()).padStart(2, '0'),
+  ].join('-')
+}
+
+function createFixedTimeRange(date: string, start: string, end: string): FixedTimeRange | null {
+  const dateParts = date.split('-').map(Number)
+  const startParts = start.split(':').map(Number)
+  const endParts = end.split(':').map(Number)
+  if (dateParts.length !== 3 || startParts.length !== 2 || endParts.length !== 2) return null
+  if ([...dateParts, ...startParts, ...endParts].some(value => !Number.isInteger(value))) return null
+
+  const [year, month, day] = dateParts
+  const [startHour, startMinute] = startParts
+  const [endHour, endMinute] = endParts
+  if (
+    month < 1 || month > 12 || day < 1 || day > 31 ||
+    startHour < 0 || startHour > 23 || endHour < 0 || endHour > 23 ||
+    startMinute < 0 || startMinute > 59 || endMinute < 0 || endMinute > 59
+  ) return null
+  const startMinutes = startHour * 60 + startMinute
+  const endMinutes = endHour * 60 + endMinute
+  if (startMinutes === endMinutes) return null
+
+  const startDate = new Date(year, month - 1, day, startHour, startMinute, 0, 0)
+  const endDate = new Date(year, month - 1, day, endHour, endMinute, 0, 0)
+  const crossesMidnight = endMinutes < startMinutes
+  if (crossesMidnight) endDate.setDate(endDate.getDate() + 1)
+
+  return {
+    date,
+    start,
+    end,
+    startTimestamp: Math.floor(startDate.getTime() / 1000),
+    endTimestamp: Math.floor(endDate.getTime() / 1000),
+    crossesMidnight,
+  }
+}
+
+function getFixedTimeRangeLabel(range: FixedTimeRange): string {
+  return `${range.start} - ${range.crossesMidnight ? '次日 ' : ''}${range.end}`
 }
 
 // Theme options
@@ -577,6 +632,9 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
   })
   const [customWindowAmount, setCustomWindowAmount] = useState(() => parseTimeWindowForCustomInput(localStorage.getItem(TIME_WINDOW_KEY) || '45min').amount)
   const [customWindowUnit, setCustomWindowUnit] = useState<CustomWindowUnit>(() => parseTimeWindowForCustomInput(localStorage.getItem(TIME_WINDOW_KEY) || '45min').unit)
+  const [fixedRangeStart, setFixedRangeStart] = useState('09:00')
+  const [fixedRangeEnd, setFixedRangeEnd] = useState('18:00')
+  const [appliedTimeRange, setAppliedTimeRange] = useState<FixedTimeRange | null>(null)
 
   const [theme, setTheme] = useState(() => {
     const saved = localStorage.getItem(THEME_KEY)
@@ -665,6 +723,10 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
 
   // 是否处于历史日期查询模式
   const isHistory = selectedDate !== ''
+  const isCustomRange = appliedTimeRange !== null
+  const activeRangeKey = appliedTimeRange
+    ? `${appliedTimeRange.startTimestamp}:${appliedTimeRange.endTimestamp}`
+    : ''
 
   // Fullscreen change listener
   useEffect(() => {
@@ -699,6 +761,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
   }, [apiUrl, getAuthHeaders])
 
   const applyTimeWindow = useCallback((window: string) => {
+    setAppliedTimeRange(null)
     setTimeWindow(window)
     saveTimeWindowToBackend(window)
     const customInput = parseTimeWindowForCustomInput(window)
@@ -720,6 +783,17 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
     }
     applyTimeWindow(`${amount}${customWindowUnit}`)
   }, [applyTimeWindow, customWindowAmount, customWindowUnit, showToast])
+
+  const applyFixedTimeRange = useCallback(() => {
+    const date = selectedDate || formatLocalDateKey(new Date())
+    const range = createFixedTimeRange(date, fixedRangeStart, fixedRangeEnd)
+    if (!range) {
+      showToast('error', '请选择有效且不相同的开始和结束时间')
+      return
+    }
+    setAppliedTimeRange(range)
+    setShowWindowDropdown(false)
+  }, [fixedRangeEnd, fixedRangeStart, selectedDate, showToast])
 
   // Save theme to backend cache
   const saveThemeToBackend = useCallback(async (newTheme: string) => {
@@ -986,7 +1060,12 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
   const fetchChannelSummaries = useCallback(async (forceRefresh = false) => {
     try {
       const cacheParam = forceRefresh ? '&no_cache=true' : ''
-      const endpoint = isHistory
+      const rangeParam = appliedTimeRange
+        ? `start_time=${appliedTimeRange.startTimestamp}&end_time=${appliedTimeRange.endTimestamp}`
+        : ''
+      const endpoint = isCustomRange
+        ? `${apiUrl}${getApiPrefix()}/channels/performance?${rangeParam}${cacheParam}`
+        : isHistory
         ? `${apiUrl}${getApiPrefix()}/history/channels/performance?date=${selectedDate}`
         : `${apiUrl}${getApiPrefix()}/channels/performance?window=${timeWindow}${cacheParam}`
       const response = await fetch(endpoint, {
@@ -1002,12 +1081,15 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
         showToast('error', '获取渠道性能失败')
       }
     }
-  }, [apiUrl, getApiPrefix, getAuthHeaders, timeWindow, isEmbed, showToast, isHistory, selectedDate])
+  }, [apiUrl, getApiPrefix, getAuthHeaders, timeWindow, isEmbed, showToast, isHistory, selectedDate, isCustomRange, activeRangeKey])
 
   const fetchChannelModelDetails = useCallback(async (channelId: number, offset = 0) => {
     if (MOCK_MODE) {
       await new Promise(r => setTimeout(r, 100))
-      const detail = mockModelStatus.getChannelModelPerformance(channelId) as any
+      const mockRange = appliedTimeRange
+        ? { startTime: appliedTimeRange.startTimestamp, endTime: appliedTimeRange.endTimestamp }
+        : undefined
+      const detail = mockModelStatus.getChannelModelPerformance(channelId, timeWindow, mockRange) as any
       setChannelModelDetails(prev => ({
         ...prev,
         [channelId]: {
@@ -1043,12 +1125,21 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
     })
 
     try {
-      const query = isHistory
-        ? `date=${selectedDate}&limit=${CHANNEL_MODEL_PAGE_SIZE}&offset=${offset}`
-        : `window=${encodeURIComponent(timeWindow)}&limit=${CHANNEL_MODEL_PAGE_SIZE}&offset=${offset}`
-      const endpoint = isHistory
-        ? `${apiUrl}${getApiPrefix()}/history/channels/${channelId}/models/performance?${query}`
-        : `${apiUrl}${getApiPrefix()}/channels/${channelId}/models/performance?${query}`
+      const queryParams = new URLSearchParams({
+        limit: CHANNEL_MODEL_PAGE_SIZE.toString(),
+        offset: offset.toString(),
+      })
+      if (appliedTimeRange) {
+        queryParams.set('start_time', appliedTimeRange.startTimestamp.toString())
+        queryParams.set('end_time', appliedTimeRange.endTimestamp.toString())
+      } else if (isHistory) {
+        queryParams.set('date', selectedDate)
+      } else {
+        queryParams.set('window', timeWindow)
+      }
+      const endpoint = isHistory && !isCustomRange
+        ? `${apiUrl}${getApiPrefix()}/history/channels/${channelId}/models/performance?${queryParams.toString()}`
+        : `${apiUrl}${getApiPrefix()}/channels/${channelId}/models/performance?${queryParams.toString()}`
       const response = await fetch(endpoint, {
         headers: getAuthHeaders(),
       })
@@ -1116,7 +1207,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
         showToast('error', '获取渠道模型明细失败')
       }
     }
-  }, [apiUrl, getApiPrefix, getAuthHeaders, isHistory, selectedDate, timeWindow, isEmbed, showToast])
+  }, [apiUrl, getApiPrefix, getAuthHeaders, isHistory, selectedDate, timeWindow, isEmbed, showToast, isCustomRange, activeRangeKey])
 
   const scrollToModelCards = useCallback(() => {
     window.requestAnimationFrame(() => {
@@ -1141,12 +1232,15 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
   useEffect(() => {
     setExpandedChannelId(null)
     setChannelModelDetails({})
-  }, [timeWindow, selectedDate, isHistory])
+  }, [timeWindow, selectedDate, isHistory, activeRangeKey])
 
   const fetchRealtimePerformanceSummary = useCallback(async (forceRefresh = false) => {
     if (MOCK_MODE) {
       await new Promise(r => setTimeout(r, 150))
-      const summary = mockModelStatus.getPerformanceSummary(timeWindow) as any
+      const mockRange = appliedTimeRange
+        ? { startTime: appliedTimeRange.startTimestamp, endTime: appliedTimeRange.endTimestamp }
+        : undefined
+      const summary = mockModelStatus.getPerformanceSummary(timeWindow, mockRange) as any
       setModelStatuses(summary.models as any)
       setChannelSummaries(summary.channels)
       setInitialLoading(false)
@@ -1158,8 +1252,15 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
     }
 
     try {
-      const cacheParam = forceRefresh ? '&no_cache=true' : ''
-      const endpoint = `${apiUrl}${getApiPrefix()}/performance/summary?window=${timeWindow}${cacheParam}`
+      const queryParams = new URLSearchParams()
+      if (appliedTimeRange) {
+        queryParams.set('start_time', appliedTimeRange.startTimestamp.toString())
+        queryParams.set('end_time', appliedTimeRange.endTimestamp.toString())
+      } else {
+        queryParams.set('window', timeWindow)
+      }
+      if (forceRefresh) queryParams.set('no_cache', 'true')
+      const endpoint = `${apiUrl}${getApiPrefix()}/performance/summary?${queryParams.toString()}`
       const response = await fetch(endpoint, {
         method: 'POST',
         headers: getAuthHeaders(),
@@ -1183,7 +1284,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
       setLoading(false)
       setRefreshing(false)
     }
-  }, [apiUrl, getApiPrefix, getAuthHeaders, selectedModels, timeWindow, availableModels.length, isEmbed, showToast])
+  }, [apiUrl, getApiPrefix, getAuthHeaders, selectedModels, timeWindow, availableModels.length, isEmbed, showToast, activeRangeKey])
 
   // Initial load
   useEffect(() => {
@@ -1196,6 +1297,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
   const prevSelectedModels = useRef<string[]>([])
   const prevTimeWindow = useRef<string>(timeWindow)
   const prevSelectedDate = useRef<string>(selectedDate)
+  const prevRangeKey = useRef(activeRangeKey)
 
   // Handle model selection and time window changes
   useEffect(() => {
@@ -1205,7 +1307,10 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
       prevSelectedModels.current = selectedModels
       prevTimeWindow.current = timeWindow
       prevSelectedDate.current = selectedDate
-      if (isHistory) {
+      prevRangeKey.current = activeRangeKey
+      if (isCustomRange) {
+        fetchRealtimePerformanceSummary(false)
+      } else if (isHistory) {
         fetchModelStatuses(false)  // Use cache on initial load
         fetchChannelSummaries(false)
       } else {
@@ -1220,33 +1325,39 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
       selectedModels.some(m => !prevSelectedModels.current.includes(m))
     const windowChanged = timeWindow !== prevTimeWindow.current
     const dateChanged = selectedDate !== prevSelectedDate.current
+    const rangeChanged = activeRangeKey !== prevRangeKey.current
 
     // Update refs
     prevSelectedModels.current = selectedModels
     prevTimeWindow.current = timeWindow
     prevSelectedDate.current = selectedDate
+    prevRangeKey.current = activeRangeKey
 
-    if (isHistory) {
-      if (modelsChanged || dateChanged) {
+    if (isCustomRange) {
+      if (modelsChanged || dateChanged || rangeChanged) {
+        fetchRealtimePerformanceSummary(rangeChanged || dateChanged)
+      }
+    } else if (isHistory) {
+      if (modelsChanged || dateChanged || rangeChanged) {
         // Models selection or date changed - fetch fresh data
         fetchModelStatuses(true)
       } else if (windowChanged) {
         // Only time window changed - can use cache (pre-warmed)
         fetchModelStatuses(false)
       }
-      if (windowChanged || dateChanged) {
+      if (windowChanged || dateChanged || rangeChanged) {
         fetchChannelSummaries(false)
       }
-    } else if (modelsChanged || dateChanged) {
+    } else if (modelsChanged || dateChanged || rangeChanged) {
       fetchRealtimePerformanceSummary(true)
     } else if (windowChanged) {
       fetchRealtimePerformanceSummary(false)
     }
-  }, [selectedModels, timeWindow, selectedDate, isHistory, fetchModelStatuses, fetchChannelSummaries, fetchRealtimePerformanceSummary])
+  }, [selectedModels, timeWindow, selectedDate, isHistory, isCustomRange, activeRangeKey, fetchModelStatuses, fetchChannelSummaries, fetchRealtimePerformanceSummary])
 
   // Auto refresh countdown (历史模式下禁用自动刷新)
   useEffect(() => {
-    if (refreshInterval === 0 || isHistory) return
+    if (refreshInterval === 0 || isHistory || isCustomRange) return
 
     const timer = setInterval(() => {
       setCountdown(prev => {
@@ -1260,7 +1371,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
     }, 1000)
 
     return () => clearInterval(timer)
-  }, [refreshInterval, fetchRealtimePerformanceSummary, isHistory])
+  }, [refreshInterval, fetchRealtimePerformanceSummary, isHistory, isCustomRange])
 
   // Reset countdown when interval changes
   useEffect(() => {
@@ -1269,7 +1380,9 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
 
   const handleRefresh = () => {
     setCountdown(refreshIntervalRef.current)
-    if (isHistory) {
+    if (isCustomRange) {
+      fetchRealtimePerformanceSummary(true)
+    } else if (isHistory) {
       fetchModelStatuses(true)
       fetchChannelSummaries(true)
     } else {
@@ -1628,7 +1741,11 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                     <h2 className="text-xl font-semibold tracking-tight whitespace-nowrap">模型状态监控</h2>
                   </div>
                   <Badge variant="outline" className="font-normal shrink-0">
-                    {isHistory ? `${selectedDate} 历史 · 按小时` : `${getTimeWindowLabel(timeWindow)} 滑动窗口`}
+                    {appliedTimeRange
+                      ? `${appliedTimeRange.date} · ${getFixedTimeRangeLabel(appliedTimeRange)}`
+                      : isHistory
+                        ? `${selectedDate} 历史 · 按小时`
+                        : `${getTimeWindowLabel(timeWindow)} 滑动窗口`}
                   </Badge>
                 </div>
                 <p className="text-sm text-muted-foreground mt-2 flex items-center flex-wrap gap-x-3 gap-y-1">
@@ -1673,6 +1790,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                         <button
                           onClick={() => {
                             setSelectedDate('')
+                            setAppliedTimeRange(null)
                             setShowDateDropdown(false)
                           }}
                           className={cn(
@@ -1690,6 +1808,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                             key={d}
                             onClick={() => {
                               setSelectedDate(d)
+                              setAppliedTimeRange(null)
                               setShowDateDropdown(false)
                             }}
                             className={cn(
@@ -1706,80 +1825,130 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                 </div>
               )}
 
-              {/* Time Window Selector (历史模式下隐藏, 历史固定按小时) */}
-              {!isHistory && (
+              {/* Time Window Selector */}
               <div className="relative" ref={windowDropdownRef}>
                 <Button
-                  variant="outline"
+                  variant={isCustomRange ? 'default' : 'outline'}
                   size="sm"
                   onClick={() => setShowWindowDropdown(!showWindowDropdown)}
                   className="h-9 shrink-0"
                 >
                   <Clock className="h-4 w-4 mr-2" />
-                  {getTimeWindowLabel(timeWindow)}
+                  {appliedTimeRange
+                    ? getFixedTimeRangeLabel(appliedTimeRange)
+                    : isHistory
+                      ? '全天'
+                      : getTimeWindowLabel(timeWindow)}
                   <ChevronDown className="h-3 w-3 ml-1" />
                 </Button>
 
                 {showWindowDropdown && (
-                  <div className="absolute right-0 mt-1 w-56 bg-popover border rounded-md shadow-lg z-40">
+                  <div className="absolute right-0 mt-1 w-[19rem] max-w-[calc(100vw-2rem)] bg-popover border rounded-md shadow-lg z-40">
                     <div className="p-2 border-b">
-                      <p className="text-xs text-muted-foreground">时间窗口</p>
+                      <p className="text-xs text-muted-foreground">查询时段</p>
                     </div>
-                    <div className="p-1">
-                      {TIME_WINDOWS.map(({ value, label }) => (
+                    {isHistory ? (
+                      <div className="p-1">
                         <button
-                          key={value}
-                          onClick={() => applyTimeWindow(value)}
+                          onClick={() => {
+                            setAppliedTimeRange(null)
+                            setShowWindowDropdown(false)
+                          }}
                           className={cn(
                             "w-full text-left px-3 py-2 text-sm rounded hover:bg-accent transition-colors",
-                            timeWindow === value && "bg-accent text-accent-foreground"
+                            !isCustomRange && "bg-accent text-accent-foreground"
                           )}
                         >
-                          {label}
+                          全天
                         </button>
-                      ))}
-                    </div>
-                    <div className="border-t p-2">
-                      <p className="text-xs text-muted-foreground mb-2">自定义</p>
-                      <div className="flex items-center gap-2">
-                        <input
-                          type="number"
-                          min="1"
-                          max={customWindowUnit === 'h' ? 168 : 10080}
-                          value={customWindowAmount}
-                          onChange={(e) => setCustomWindowAmount(e.target.value.replace(/[^\d]/g, ''))}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') applyCustomTimeWindow()
-                          }}
-                          className="h-8 min-w-0 flex-1 px-2 text-sm bg-muted/50 border rounded-md focus:outline-none focus:ring-1 focus:ring-primary"
-                        />
-                        <div className="inline-flex h-8 rounded-md border overflow-hidden flex-shrink-0">
-                          {[
-                            { value: 'min' as CustomWindowUnit, label: '分钟' },
-                            { value: 'h' as CustomWindowUnit, label: '小时' },
-                          ].map(({ value, label }) => (
+                      </div>
+                    ) : (
+                      <>
+                        <div className="p-1">
+                          {TIME_WINDOWS.map(({ value, label }) => (
                             <button
                               key={value}
-                              type="button"
-                              onClick={() => setCustomWindowUnit(value)}
+                              onClick={() => applyTimeWindow(value)}
                               className={cn(
-                                "px-2 text-xs transition-colors",
-                                customWindowUnit === value ? "bg-primary text-primary-foreground" : "hover:bg-accent"
+                                "w-full text-left px-3 py-2 text-sm rounded hover:bg-accent transition-colors",
+                                !isCustomRange && timeWindow === value && "bg-accent text-accent-foreground"
                               )}
                             >
                               {label}
                             </button>
                           ))}
                         </div>
-                        <Button size="sm" className="h-8 px-2 flex-shrink-0" onClick={applyCustomTimeWindow}>
-                          应用
+                        <div className="border-t p-2">
+                          <p className="text-xs text-muted-foreground mb-2">自定义窗口</p>
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="number"
+                              min="1"
+                              max={customWindowUnit === 'h' ? 168 : 10080}
+                              value={customWindowAmount}
+                              onChange={(e) => setCustomWindowAmount(e.target.value.replace(/[^\d]/g, ''))}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') applyCustomTimeWindow()
+                              }}
+                              className="h-8 min-w-0 flex-1 px-2 text-sm bg-muted/50 border rounded-md focus:outline-none focus:ring-1 focus:ring-primary"
+                            />
+                            <div className="inline-flex h-8 rounded-md border overflow-hidden flex-shrink-0">
+                              {[
+                                { value: 'min' as CustomWindowUnit, label: '分钟' },
+                                { value: 'h' as CustomWindowUnit, label: '小时' },
+                              ].map(({ value, label }) => (
+                                <button
+                                  key={value}
+                                  type="button"
+                                  onClick={() => setCustomWindowUnit(value)}
+                                  className={cn(
+                                    "px-2 text-xs transition-colors",
+                                    customWindowUnit === value ? "bg-primary text-primary-foreground" : "hover:bg-accent"
+                                  )}
+                                >
+                                  {label}
+                                </button>
+                              ))}
+                            </div>
+                            <Button size="sm" className="h-8 px-2 flex-shrink-0" onClick={applyCustomTimeWindow}>
+                              应用
+                            </Button>
+                          </div>
+                        </div>
+                      </>
+                    )}
+                    <div className="border-t p-2">
+                      <p className="text-xs text-muted-foreground mb-2">固定时段</p>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="time"
+                          aria-label="开始时间"
+                          value={fixedRangeStart}
+                          onChange={(e) => setFixedRangeStart(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') applyFixedTimeRange()
+                          }}
+                          className="h-8 min-w-[5.5rem] w-0 flex-1 px-2 text-sm tabular-nums bg-muted/50 border rounded-md focus:outline-none focus:ring-1 focus:ring-primary"
+                        />
+                        <span className="text-xs text-muted-foreground">至</span>
+                        <input
+                          type="time"
+                          aria-label="结束时间"
+                          value={fixedRangeEnd}
+                          onChange={(e) => setFixedRangeEnd(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') applyFixedTimeRange()
+                          }}
+                          className="h-8 min-w-[5.5rem] w-0 flex-1 px-2 text-sm tabular-nums bg-muted/50 border rounded-md focus:outline-none focus:ring-1 focus:ring-primary"
+                        />
+                        <Button size="icon" className="h-8 w-8 shrink-0" onClick={applyFixedTimeRange} title="查询固定时段">
+                          <Search className="h-3.5 w-3.5" />
                         </Button>
                       </div>
                     </div>
                   </div>
                 )}
               </div>
-              )}
 
               {/* Theme Selector */}
               <div className="relative" ref={themeDropdownRef}>
@@ -1971,12 +2140,16 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                 <Button
                   variant="outline"
                   size="sm"
+                  disabled={isHistory || isCustomRange}
+                  title={isHistory || isCustomRange ? '固定查询不自动刷新' : '设置自动刷新间隔'}
                   onClick={() => setShowIntervalDropdown(!showIntervalDropdown)}
                   className="h-9 w-[120px] justify-between"
                 >
                   <div className="flex items-center">
                     <Timer className="h-4 w-4 mr-2 flex-shrink-0" />
-                    {refreshInterval > 0 && countdown > 0 ? (
+                    {isHistory || isCustomRange ? (
+                      <span>固定查询</span>
+                    ) : refreshInterval > 0 && countdown > 0 ? (
                       <span className="text-primary font-medium tabular-nums">{formatCountdown(countdown)}</span>
                     ) : (
                       <span>自动刷新</span>

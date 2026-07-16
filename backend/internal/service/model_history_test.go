@@ -392,3 +392,27 @@ func TestParseCustomTimeWindow(t *testing.T) {
 		})
 	}
 }
+
+func TestValidatePerformanceTimeRange(t *testing.T) {
+	tests := []struct {
+		name      string
+		startTime int64
+		endTime   int64
+		wantError bool
+	}{
+		{name: "valid intraday range", startTime: 1_700_000_000, endTime: 1_700_003_600},
+		{name: "valid overnight range", startTime: 1_700_000_000, endTime: 1_700_086_400},
+		{name: "missing start", startTime: 0, endTime: 1_700_003_600, wantError: true},
+		{name: "reversed range", startTime: 1_700_003_600, endTime: 1_700_000_000, wantError: true},
+		{name: "more than seven days", startTime: 1_700_000_000, endTime: 1_700_000_000 + 7*24*60*60 + 1, wantError: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidatePerformanceTimeRange(tt.startTime, tt.endTime)
+			if (err != nil) != tt.wantError {
+				t.Fatalf("ValidatePerformanceTimeRange(%d, %d) error=%v, wantError=%v", tt.startTime, tt.endTime, err, tt.wantError)
+			}
+		})
+	}
+}

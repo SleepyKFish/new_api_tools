@@ -31,11 +31,12 @@ var (
 		"dark":   "obsidian",
 		"system": "daylight",
 	}
-	AvailableRefreshIntervals = []int{0, 30, 60, 120, 300}
-	AvailableSortModes        = []string{"default", "availability", "custom"}
-	performanceLogBatchSize   = 5000
+	AvailableRefreshIntervals   = []int{0, 30, 60, 120, 300}
+	AvailableSortModes          = []string{"default", "availability", "custom"}
+	performanceLogBatchSize     = 5000
 	modelStatusRealtimeCacheTTL = 30 * time.Second
-	modelHistoryBatchInterval = 2 * time.Minute
+	modelHistoryBatchInterval   = 2 * time.Minute
+	maxPerformanceRangeSeconds  = int64(7 * 24 * 60 * 60)
 )
 
 // Time window slot configurations: {totalSeconds, numSlots, slotSeconds}
@@ -79,7 +80,7 @@ func ParseTimeWindow(window string) (timeWindowConfig, bool) {
 	default:
 		return timeWindowConfig{}, false
 	}
-	if totalSeconds < 60 || totalSeconds > 7*24*3600 {
+	if totalSeconds < 60 || totalSeconds > maxPerformanceRangeSeconds {
 		return timeWindowConfig{}, false
 	}
 
@@ -88,6 +89,30 @@ func ParseTimeWindow(window string) (timeWindowConfig, bool) {
 		numSlots:     chooseTimeWindowSlotCount(totalSeconds),
 		slotSeconds:  chooseTimeWindowSlotSeconds(totalSeconds),
 	}, true
+}
+
+// ValidatePerformanceTimeRange validates an explicit [start, end) query range.
+func ValidatePerformanceTimeRange(startTime, endTime int64) error {
+	if startTime <= 0 || endTime <= startTime {
+		return fmt.Errorf("start_time must be earlier than end_time")
+	}
+	if endTime-startTime > maxPerformanceRangeSeconds {
+		return fmt.Errorf("time range cannot exceed 7 days")
+	}
+	return nil
+}
+
+func performanceTimeRangeConfig(startTime, endTime int64) timeWindowConfig {
+	totalSeconds := endTime - startTime
+	return timeWindowConfig{
+		totalSeconds: totalSeconds,
+		numSlots:     chooseTimeWindowSlotCount(totalSeconds),
+		slotSeconds:  chooseTimeWindowSlotSeconds(totalSeconds),
+	}
+}
+
+func performanceTimeRangeKey(startTime, endTime int64) string {
+	return fmt.Sprintf("range:%d:%d", startTime, endTime)
 }
 
 func IsValidTimeWindow(window string) bool {
@@ -1483,7 +1508,36 @@ func (s *ModelStatusService) GetRealtimePerformanceSummary(modelNames []string, 
 		twConfig = timeWindowConfigs[DefaultTimeWindow]
 	}
 
-	cacheKey := performanceSummaryCacheKey(window, modelNames)
+	now := time.Now().Unix()
+	startTime := now - twConfig.totalSeconds
+	return s.getPerformanceSummaryForRange(modelNames, window, startTime, now, twConfig, useCache)
+}
+
+// GetPerformanceSummaryByRange returns the same model/channel payload as the
+// sliding-window endpoint for an explicit [startTime, endTime) interval.
+func (s *ModelStatusService) GetPerformanceSummaryByRange(modelNames []string, startTime, endTime int64, useCache bool) (map[string]interface{}, error) {
+	if err := ValidatePerformanceTimeRange(startTime, endTime); err != nil {
+		return nil, err
+	}
+	return s.getPerformanceSummaryForRange(
+		modelNames,
+		performanceTimeRangeKey(startTime, endTime),
+		startTime,
+		endTime,
+		performanceTimeRangeConfig(startTime, endTime),
+		useCache,
+	)
+}
+
+func (s *ModelStatusService) getPerformanceSummaryForRange(
+	modelNames []string,
+	queryKey string,
+	startTime int64,
+	endTime int64,
+	twConfig timeWindowConfig,
+	useCache bool,
+) (map[string]interface{}, error) {
+	cacheKey := performanceSummaryCacheKey(queryKey, modelNames)
 	cm := cache.Get()
 	if useCache {
 		var cached map[string]interface{}
@@ -1493,9 +1547,7 @@ func (s *ModelStatusService) GetRealtimePerformanceSummary(modelNames []string, 
 		}
 	}
 
-	now := time.Now().Unix()
-	startTime := now - twConfig.totalSeconds
-	agg, err := s.aggregateRealtimePerformance(modelNames, startTime, now, twConfig.slotSeconds, twConfig.numSlots)
+	agg, err := s.aggregateRealtimePerformance(modelNames, startTime, endTime, twConfig.slotSeconds, twConfig.numSlots)
 	if err != nil {
 		return nil, err
 	}
@@ -1505,7 +1557,7 @@ func (s *ModelStatusService) GetRealtimePerformanceSummary(modelNames []string, 
 	for _, modelName := range modelNames {
 		models = append(models, buildModelPerformanceResult(
 			modelName,
-			window,
+			queryKey,
 			agg.modelAvailability[modelName],
 			agg.modelPerformance[modelName],
 			startTime,
@@ -1521,7 +1573,7 @@ func (s *ModelStatusService) GetRealtimePerformanceSummary(modelNames []string, 
 	}
 	channelNames := s.getChannelNameMap(channelIDs)
 	channelModelCounts := s.cacheChannelModelPerformanceDetails(
-		window,
+		queryKey,
 		channelIDs,
 		channelNames,
 		agg.channelModelAvailability,
@@ -1565,10 +1617,37 @@ func (s *ModelStatusService) GetRealtimePerformanceSummary(modelNames []string, 
 	result := map[string]interface{}{
 		"models":      models,
 		"channels":    channels,
-		"time_window": window,
+		"time_window": queryKey,
+		"start_time":  startTime,
+		"end_time":    endTime,
 	}
 	cm.Set(cacheKey, result, modelStatusRealtimeCacheTTL)
 	return result, nil
+}
+
+func performanceMapSlice(value interface{}) []map[string]interface{} {
+	switch items := value.(type) {
+	case []map[string]interface{}:
+		return items
+	case []interface{}:
+		result := make([]map[string]interface{}, 0, len(items))
+		for _, item := range items {
+			if mapped, ok := item.(map[string]interface{}); ok {
+				result = append(result, mapped)
+			}
+		}
+		return result
+	default:
+		return []map[string]interface{}{}
+	}
+}
+
+func (s *ModelStatusService) GetChannelPerformanceSummariesByRange(startTime, endTime int64, useCache bool) ([]map[string]interface{}, error) {
+	summary, err := s.GetPerformanceSummaryByRange(nil, startTime, endTime, useCache)
+	if err != nil {
+		return nil, err
+	}
+	return performanceMapSlice(summary["channels"]), nil
 }
 
 func (s *ModelStatusService) GetChannelPerformanceSummaries(window string, useCache ...bool) ([]map[string]interface{}, error) {
@@ -1742,6 +1821,36 @@ func (s *ModelStatusService) GetChannelModelPerformance(channelID int64, window 
 	if _, ok := ParseTimeWindow(window); !ok {
 		window = DefaultTimeWindow
 	}
+	return s.getChannelModelPerformanceByKey(channelID, window, limit, offset, func() error {
+		_, err := s.GetChannelPerformanceSummaries(window, false)
+		return err
+	})
+}
+
+func (s *ModelStatusService) GetChannelModelPerformanceByRange(channelID, startTime, endTime int64, limit, offset int) (map[string]interface{}, error) {
+	if err := ValidatePerformanceTimeRange(startTime, endTime); err != nil {
+		return nil, err
+	}
+	queryKey := performanceTimeRangeKey(startTime, endTime)
+	result, err := s.getChannelModelPerformanceByKey(channelID, queryKey, limit, offset, func() error {
+		_, err := s.GetPerformanceSummaryByRange(nil, startTime, endTime, false)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	result["start_time"] = startTime
+	result["end_time"] = endTime
+	return result, nil
+}
+
+func (s *ModelStatusService) getChannelModelPerformanceByKey(
+	channelID int64,
+	queryKey string,
+	limit int,
+	offset int,
+	populate func() error,
+) (map[string]interface{}, error) {
 	if limit <= 0 {
 		limit = 100
 	}
@@ -1753,11 +1862,11 @@ func (s *ModelStatusService) GetChannelModelPerformance(channelID int64, window 
 	}
 
 	cm := cache.Get()
-	cacheKey := channelModelDetailCacheKey(window, channelID)
+	cacheKey := channelModelDetailCacheKey(queryKey, channelID)
 	all := make([]map[string]interface{}, 0)
 	found, _ := cm.GetJSON(cacheKey, &all)
 	if !found {
-		if _, err := s.GetChannelPerformanceSummaries(window, false); err != nil {
+		if err := populate(); err != nil {
 			return nil, err
 		}
 		found, _ = cm.GetJSON(cacheKey, &all)
@@ -1792,12 +1901,12 @@ func (s *ModelStatusService) GetChannelModelPerformance(channelID int64, window 
 	return map[string]interface{}{
 		"channel_id":   channelID,
 		"channel_name": channelName,
-		"window":       window,
-		"time_window":  window,
+		"window":       queryKey,
+		"time_window":  queryKey,
 		"total":        total,
 		"limit":        limit,
 		"offset":       offset,
-		"has_more":    offset+len(data) < total,
+		"has_more":     offset+len(data) < total,
 		"data":         data,
 	}, nil
 }

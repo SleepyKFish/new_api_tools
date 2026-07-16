@@ -327,7 +327,37 @@ const MODEL_NAMES = [
   'qwen-plus', 'qwen-max', 'hunyuan-turbo', 'glm-4',
 ]
 
-function genSlotData(window: string): Array<{
+interface MockPerformanceRange {
+  startTime: number
+  endTime: number
+}
+
+function getMockTimeConfig(window: string, range?: MockPerformanceRange) {
+  const windowSeconds: Record<string, number> = {
+    '15m': 15 * 60,
+    '30m': 30 * 60,
+    '1h': 60 * 60,
+    '6h': 6 * 60 * 60,
+    '12h': 12 * 60 * 60,
+    '24h': 24 * 60 * 60,
+  }
+  const customMatch = window.match(/^(\d+)(?:min|m|h)$/)
+  const customSeconds = customMatch
+    ? Number(customMatch[1]) * (window.endsWith('h') ? 60 * 60 : 60)
+    : 0
+  const totalSeconds = range
+    ? Math.max(60, range.endTime - range.startTime)
+    : windowSeconds[window] || customSeconds || windowSeconds['24h']
+  const slotCount = totalSeconds <= 60 * 60
+    ? Math.max(1, Math.floor(totalSeconds / 60))
+    : 24
+  const slotSeconds = Math.max(60, Math.floor(totalSeconds / slotCount))
+  const endTime = range?.endTime ?? Math.floor(Date.now() / 1000)
+  const startTime = range?.startTime ?? endTime - totalSeconds
+  return { startTime, endTime, slotCount, slotSeconds }
+}
+
+function genSlotData(window: string, range?: MockPerformanceRange): Array<{
   slot: number; start_time: number; end_time: number
   total_requests: number; success_count: number; failure_count: number
   format_error_count: number; rate_limit_count: number; empty_count: number
@@ -342,14 +372,13 @@ function genSlotData(window: string): Array<{
   total_quota: number
   completion_tps: number | null; timed_requests: number; duration_timed_requests: number; output_requests: number
 }> {
-  const nowSec = Math.floor(Date.now() / 1000)
   const slots: ReturnType<typeof genSlotData> = []
-  const slotCount = window === '24h' ? 24 : window === '6h' ? 24 : window === '1h' ? 60 : 15
-  const slotSec = window === '24h' ? 3600 : window === '6h' ? 900 : window === '1h' ? 60 : 60
-  const startTime = nowSec - slotCount * slotSec
+  const { startTime, endTime, slotCount, slotSeconds } = getMockTimeConfig(window, range)
 
   for (let i = 0; i < slotCount; i++) {
-    const hour = new Date((startTime + i * slotSec) * 1000).getHours()
+    const slotStart = startTime + i * slotSeconds
+    const slotEnd = i === slotCount - 1 ? endTime : slotStart + slotSeconds
+    const hour = new Date(slotStart * 1000).getHours()
     // Simulate daily pattern
     const peak = Math.max(0.15, 1 - Math.abs(hour - 11) / 12) * 0.7 + Math.max(0.1, 1 - Math.abs(hour - 16) / 12) * 0.4
     const req = Math.floor((30 + Math.random() * 20) * peak * (0.7 + Math.random() * 0.6))
@@ -362,8 +391,8 @@ function genSlotData(window: string): Array<{
 
     slots.push({
       slot: i,
-      start_time: startTime + i * slotSec,
-      end_time: startTime + (i + 1) * slotSec,
+      start_time: slotStart,
+      end_time: slotEnd,
       total_requests: total,
       success_count: success,
       failure_count: fail,
@@ -399,8 +428,8 @@ function genSlotData(window: string): Array<{
   return slots
 }
 
-function genModelStatus(name: string, window: string) {
-  const slots = genSlotData(window)
+function genModelStatus(name: string, window: string, range?: MockPerformanceRange) {
+  const slots = genSlotData(window, range)
   const totalReq = slots.reduce((s, sl) => s + sl.total_requests, 0)
   const totalSuccess = slots.reduce((s, sl) => s + sl.success_count, 0)
   const totalFail = slots.reduce((s, sl) => s + sl.failure_count, 0)
@@ -444,8 +473,8 @@ function genModelStatus(name: string, window: string) {
   }
 }
 
-function genChannelPerformance(id: number, name: string, window: string, modelCount: number) {
-  const slots = genSlotData(window)
+function genChannelPerformance(id: number, name: string, window: string, modelCount: number, range?: MockPerformanceRange) {
+  const slots = genSlotData(window, range)
   const totalReq = slots.reduce((s, sl) => s + sl.total_requests, 0)
   const totalSuccess = slots.reduce((s, sl) => s + sl.success_count, 0)
   const totalFail = slots.reduce((s, sl) => s + sl.failure_count, 0)
@@ -504,24 +533,29 @@ export const mockModelStatus = {
     }))
   },
 
-  getPerformanceSummary(window = '24h') {
-    const models = MODEL_NAMES.map(name => genModelStatus(name, window))
-    const channels = CHANNELS.map(ch => genChannelPerformance(ch.id, ch.name, window, ch.modelCount))
+  getPerformanceSummary(window = '24h', range?: MockPerformanceRange) {
+    const queryKey = range ? `range:${range.startTime}:${range.endTime}` : window
+    const models = MODEL_NAMES.map(name => genModelStatus(name, queryKey, range))
+    const channels = CHANNELS.map(ch => genChannelPerformance(ch.id, ch.name, queryKey, ch.modelCount, range))
     return {
       models,
       channels,
-      time_window: window,
+      time_window: queryKey,
+      start_time: range?.startTime,
+      end_time: range?.endTime,
     }
   },
 
-  getChannelModelPerformance(channelId: number) {
+  getChannelModelPerformance(channelId: number, window = '24h', range?: MockPerformanceRange) {
     const ch = CHANNELS.find(c => c.id === channelId)
     const modelCount = ch?.modelCount ?? 2
-    const models = MODEL_NAMES.slice(0, modelCount).map(name => genModelStatus(name, '24h'))
+    const queryKey = range ? `range:${range.startTime}:${range.endTime}` : window
+    const models = MODEL_NAMES.slice(0, modelCount).map(name => genModelStatus(name, queryKey, range))
     return {
       channel_id: channelId,
       channel_name: ch?.name ?? `Channel#${channelId}`,
-      window: '24h', time_window: '24h',
+      window: queryKey, time_window: queryKey,
+      start_time: range?.startTime, end_time: range?.endTime,
       total: models.length, limit: 100, offset: 0, has_more: false,
       data: models.map(m => ({ ...m, channel_id: channelId, channel_name: ch?.name ?? '' })),
       success: true,
