@@ -7,10 +7,8 @@ import { Card, CardContent } from './ui/card'
 import { Button } from './ui/button'
 import { cn } from '../lib/utils'
 import { formatCostPrecise, formatNumber } from '../lib/format'
+import { MOCK_MODE } from '../lib/env'
 import { mockDashboardData } from './mockData'
-
-// Set to true to use mock data without connecting to backend
-const USE_MOCK = !import.meta.env.VITE_API_URL
 
 type RefreshInterval = 0 | 30 | 60 | 120 | 300 // 秒，0表示关闭
 
@@ -243,7 +241,7 @@ export function Dashboard() {
   }, [apiUrl, getAuthHeaders, period])
 
   const fetchAll = useCallback(async (noCache = false, signal?: AbortSignal): Promise<boolean> => {
-    if (USE_MOCK) {
+    if (MOCK_MODE) {
       const results = await Promise.all([
         mockOverview(), mockUsage(), mockTrends(noCache, signal), mockAnalyticsSummary(),
       ])
@@ -259,7 +257,7 @@ export function Dashboard() {
   }, [fetchOverview, fetchUsage, fetchTrends, fetchAnalyticsSummary, mockOverview, mockUsage, mockTrends, mockAnalyticsSummary])
 
   const refreshAll = useCallback(async (signal?: AbortSignal): Promise<boolean> => {
-    if (USE_MOCK) {
+    if (MOCK_MODE) {
       const results = await Promise.all([
         mockOverview(), mockUsage(), mockTrends(true, signal), mockAnalyticsSummary(),
       ])

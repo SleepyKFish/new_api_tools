@@ -11,6 +11,7 @@ import { Button } from './ui/button'
 import { Badge } from './ui/badge'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from './ui/dialog'
 import { useClickOutside } from '../hooks/useClickOutside'
+import { MOCK_MODE } from '../lib/env'
 import { mockModelStatus } from './mockData'
 import {
   OpenAI, Gemini, DeepSeek, SiliconCloud, Groq, Ollama, Claude, Mistral,
@@ -698,7 +699,6 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
   const modelCardsSectionRef = useRef<HTMLDivElement>(null)
 
   const apiUrl = import.meta.env.VITE_API_URL || ''
-  const MOCK_MODE = !import.meta.env.VITE_API_URL
 
   const getAuthHeaders = useCallback((): Record<string, string> => {
     if (isEmbed) {

@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, useCallback, ReactNode, useEffect } from 'react'
 import { setGlobalLogout, clearGlobalLogout } from '../lib/api'
+import { MOCK_MODE } from '../lib/env'
 
 const TOKEN_KEY = 'newapi_tools_token'
 const TOKEN_EXPIRY_KEY = 'newapi_tools_token_expiry'
@@ -26,8 +27,6 @@ interface AuthProviderProps {
 }
 
 export function AuthProvider({ children }: AuthProviderProps) {
-  const MOCK_MODE = !import.meta.env.VITE_API_URL
-
   const [token, setToken] = useState<string | null>(() => {
     // Mock mode: auto-login with fake token
     if (MOCK_MODE) {

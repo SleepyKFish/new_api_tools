@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { Login, Layout, TabType, Generator, History, TopUps, Dashboard, Redemptions, Analytics, UserManagement, RealtimeRanking, IPAnalysis, ModelStatusMonitor, AutoGroup, Tokens } from './components'
 import { useAuth } from './contexts/AuthContext'
 import { WarmupScreen } from './components/WarmupScreen'
+import { MOCK_MODE } from './lib/env'
 
 // Valid tabs
 const validTabs: TabType[] = ['dashboard', 'topups', 'risk', 'ip-analysis', 'analytics', 'model-status', 'users', 'tokens', 'auto-group', 'generator', 'redemptions', 'history']
@@ -32,11 +33,10 @@ function App() {
   const { isAuthenticated, token, login, logout } = useAuth()
   const [activeTab, setActiveTab] = useState<TabType>(getInitialTab)
   const [warmupState, setWarmupState] = useState<'checking' | 'warming' | 'ready'>(
-    !import.meta.env.VITE_API_URL ? 'ready' : 'checking'
+    MOCK_MODE ? 'ready' : 'checking'
   )
 
   const apiUrl = import.meta.env.VITE_API_URL || ''
-  const MOCK_MODE = !import.meta.env.VITE_API_URL
 
   // 检查后端预热状态（mock 模式跳过）
   useEffect(() => {
