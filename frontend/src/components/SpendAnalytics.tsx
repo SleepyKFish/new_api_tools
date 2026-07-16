@@ -145,8 +145,8 @@ function buildOption(m: ChartModel): EChartsOption {
   return {
     animationDuration: 400,
     grid: [
-      { left: 58, right: 24, top: 24, height: 170 },
-      { left: 58, right: 24, top: 254, height: 170 },
+      { left: 72, right: 24, top: 32, height: 162 },
+      { left: 72, right: 24, top: 262, height: 162 },
     ],
     axisPointer: {
       link: [{ xAxisIndex: 'all' }],
@@ -178,7 +178,25 @@ function buildOption(m: ChartModel): EChartsOption {
         ].join('')
       },
     },
-    legend: [],
+    legend: [
+      {
+        data: ['花费'],
+        left: 72,
+        top: 2,
+        itemWidth: 14,
+        itemHeight: 8,
+        textStyle: { color: labelColor, fontSize: 10 },
+      },
+      {
+        data: ['缓存命中', '缓存未命中', '输出'],
+        left: 72,
+        top: 232,
+        itemWidth: 12,
+        itemHeight: 8,
+        itemGap: 16,
+        textStyle: { color: labelColor, fontSize: 10 },
+      },
+    ],
     xAxis: [
       {
         type: 'category',
@@ -203,7 +221,10 @@ function buildOption(m: ChartModel): EChartsOption {
       {
         type: 'value',
         gridIndex: 0,
-        name: '花费(¥)',
+        name: '花费 (¥)',
+        nameLocation: 'middle',
+        nameRotate: 90,
+        nameGap: 52,
         nameTextStyle: { color: labelColor, fontSize: 10 },
         axisLabel: { color: labelColor, fontSize: 10, formatter: (v: number) => `¥${v}` },
         splitLine,
@@ -212,6 +233,9 @@ function buildOption(m: ChartModel): EChartsOption {
         type: 'value',
         gridIndex: 1,
         name: 'Token',
+        nameLocation: 'middle',
+        nameRotate: 90,
+        nameGap: 52,
         nameTextStyle: { color: labelColor, fontSize: 10 },
         axisLabel: { color: labelColor, fontSize: 10, formatter: (v: number) => formatTokens(v) },
         splitLine,
