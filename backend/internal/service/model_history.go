@@ -4,8 +4,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -61,6 +64,7 @@ type dailyPerfStats struct {
 	outputTokensSum       float64
 	completionTokensSum   float64
 	useTimeSum            float64
+	quotaSum              float64
 }
 
 // GetModelHistoryService returns the lazily-initialized singleton. It opens
@@ -129,6 +133,7 @@ func (s *ModelHistoryService) ensureSchema() error {
 			input_tokens_sum REAL NOT NULL DEFAULT 0,
 			output_tokens_sum REAL NOT NULL DEFAULT 0,
 			completion_tokens_sum REAL NOT NULL DEFAULT 0,
+			quota_sum REAL NOT NULL DEFAULT 0,
 			use_time_sum REAL NOT NULL DEFAULT 0,
 			start_time INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (date, model_name)
@@ -158,6 +163,7 @@ func (s *ModelHistoryService) ensureSchema() error {
 			input_tokens_sum REAL NOT NULL DEFAULT 0,
 			output_tokens_sum REAL NOT NULL DEFAULT 0,
 			completion_tokens_sum REAL NOT NULL DEFAULT 0,
+			quota_sum REAL NOT NULL DEFAULT 0,
 			use_time_sum REAL NOT NULL DEFAULT 0,
 			PRIMARY KEY (date, model_name, slot_idx)
 		)`,
@@ -186,6 +192,7 @@ func (s *ModelHistoryService) ensureSchema() error {
 			input_tokens_sum REAL NOT NULL DEFAULT 0,
 			output_tokens_sum REAL NOT NULL DEFAULT 0,
 			completion_tokens_sum REAL NOT NULL DEFAULT 0,
+			quota_sum REAL NOT NULL DEFAULT 0,
 			use_time_sum REAL NOT NULL DEFAULT 0,
 			PRIMARY KEY (date, channel_id)
 		)`,
@@ -214,6 +221,7 @@ func (s *ModelHistoryService) ensureSchema() error {
 			input_tokens_sum REAL NOT NULL DEFAULT 0,
 			output_tokens_sum REAL NOT NULL DEFAULT 0,
 			completion_tokens_sum REAL NOT NULL DEFAULT 0,
+			quota_sum REAL NOT NULL DEFAULT 0,
 			use_time_sum REAL NOT NULL DEFAULT 0,
 			PRIMARY KEY (date, channel_id, slot_idx)
 		)`,
@@ -242,6 +250,7 @@ func (s *ModelHistoryService) ensureSchema() error {
 			input_tokens_sum REAL NOT NULL DEFAULT 0,
 			output_tokens_sum REAL NOT NULL DEFAULT 0,
 			completion_tokens_sum REAL NOT NULL DEFAULT 0,
+			quota_sum REAL NOT NULL DEFAULT 0,
 			use_time_sum REAL NOT NULL DEFAULT 0,
 			PRIMARY KEY (date, channel_id, model_name)
 		)`,
@@ -271,6 +280,7 @@ func (s *ModelHistoryService) ensureSchema() error {
 			input_tokens_sum REAL NOT NULL DEFAULT 0,
 			output_tokens_sum REAL NOT NULL DEFAULT 0,
 			completion_tokens_sum REAL NOT NULL DEFAULT 0,
+			quota_sum REAL NOT NULL DEFAULT 0,
 			use_time_sum REAL NOT NULL DEFAULT 0,
 			PRIMARY KEY (date, channel_id, model_name, slot_idx)
 		)`,
@@ -310,6 +320,7 @@ func (s *ModelHistoryService) ensureSchema() error {
 		{"input_tokens_sum", "REAL NOT NULL DEFAULT 0"},
 		{"output_tokens_sum", "REAL NOT NULL DEFAULT 0"},
 		{"completion_tokens_sum", "REAL NOT NULL DEFAULT 0"},
+		{"quota_sum", "REAL NOT NULL DEFAULT 0"},
 		{"use_time_sum", "REAL NOT NULL DEFAULT 0"},
 	}
 	for _, table := range []string{"model_daily_summary", "model_hourly_slot", "model_daily_channel", "channel_hourly_slot", "model_daily_channel_model", "channel_model_hourly_slot"} {
@@ -426,6 +437,7 @@ type slotCounts struct {
 	outputTokensSum       float64
 	completionTokensSum   float64
 	useTimeSum            float64
+	quotaSum              float64
 }
 
 // SaveDay persists a day snapshot transactionally, replacing any existing rows
@@ -449,8 +461,8 @@ func (s *ModelHistoryService) SaveDay(snap *daySnapshot) error {
 		duration_within_10s, duration_within_20s, output_requests, claude_requests,
 		cache_denominator_sum, cache_tokens_sum, cache_write_sum,
 		cache_write_tokens_sum, input_tokens_sum, output_tokens_sum,
-		completion_tokens_sum, use_time_sum, start_time
-	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		completion_tokens_sum, quota_sum, use_time_sum, start_time
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -462,7 +474,7 @@ func (s *ModelHistoryService) SaveDay(snap *daySnapshot) error {
 			st.durationWithin10s, st.durationWithin20s, st.outputRequests, st.claudeRequests,
 			st.cacheDenominatorSum, st.cacheTokensSum, st.cacheWriteSum,
 			st.cacheWriteTokensSum, st.inputTokensSum, st.outputTokensSum,
-			st.completionTokensSum, st.useTimeSum, snap.startTS,
+			st.completionTokensSum, st.quotaSum, st.useTimeSum, snap.startTS,
 		); err != nil {
 			return err
 		}
@@ -474,8 +486,8 @@ func (s *ModelHistoryService) SaveDay(snap *daySnapshot) error {
 		duration_within_10s, duration_within_20s, output_requests, claude_requests,
 		cache_denominator_sum, cache_tokens_sum, cache_write_sum,
 		cache_write_tokens_sum, input_tokens_sum, output_tokens_sum,
-		completion_tokens_sum, use_time_sum
-	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		completion_tokens_sum, quota_sum, use_time_sum
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -488,7 +500,7 @@ func (s *ModelHistoryService) SaveDay(snap *daySnapshot) error {
 				c.durationWithin10s, c.durationWithin20s, c.outputRequests, c.claudeRequests,
 				c.cacheDenominatorSum, c.cacheTokensSum, c.cacheWriteSum,
 				c.cacheWriteTokensSum, c.inputTokensSum, c.outputTokensSum,
-				c.completionTokensSum, c.useTimeSum,
+				c.completionTokensSum, c.quotaSum, c.useTimeSum,
 			); err != nil {
 				return err
 			}
@@ -501,8 +513,8 @@ func (s *ModelHistoryService) SaveDay(snap *daySnapshot) error {
 		duration_timed_requests, duration_within_10s, duration_within_20s, output_requests,
 		claude_requests, cache_denominator_sum, cache_tokens_sum, cache_write_sum,
 		cache_write_tokens_sum, input_tokens_sum, output_tokens_sum,
-		completion_tokens_sum, use_time_sum
-	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		completion_tokens_sum, quota_sum, use_time_sum
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -514,7 +526,7 @@ func (s *ModelHistoryService) SaveDay(snap *daySnapshot) error {
 			st.durationTimedRequests, st.durationWithin10s, st.durationWithin20s, st.outputRequests,
 			st.claudeRequests, st.cacheDenominatorSum, st.cacheTokensSum, st.cacheWriteSum,
 			st.cacheWriteTokensSum, st.inputTokensSum, st.outputTokensSum,
-			st.completionTokensSum, st.useTimeSum,
+			st.completionTokensSum, st.quotaSum, st.useTimeSum,
 		); err != nil {
 			return err
 		}
@@ -526,8 +538,8 @@ func (s *ModelHistoryService) SaveDay(snap *daySnapshot) error {
 		duration_within_10s, duration_within_20s, output_requests, claude_requests,
 		cache_denominator_sum, cache_tokens_sum, cache_write_sum,
 		cache_write_tokens_sum, input_tokens_sum, output_tokens_sum,
-		completion_tokens_sum, use_time_sum
-	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		completion_tokens_sum, quota_sum, use_time_sum
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -540,7 +552,7 @@ func (s *ModelHistoryService) SaveDay(snap *daySnapshot) error {
 				c.durationWithin10s, c.durationWithin20s, c.outputRequests, c.claudeRequests,
 				c.cacheDenominatorSum, c.cacheTokensSum, c.cacheWriteSum,
 				c.cacheWriteTokensSum, c.inputTokensSum, c.outputTokensSum,
-				c.completionTokensSum, c.useTimeSum,
+				c.completionTokensSum, c.quotaSum, c.useTimeSum,
 			); err != nil {
 				return err
 			}
@@ -553,8 +565,8 @@ func (s *ModelHistoryService) SaveDay(snap *daySnapshot) error {
 		duration_timed_requests, duration_within_10s, duration_within_20s, output_requests,
 		claude_requests, cache_denominator_sum, cache_tokens_sum, cache_write_sum,
 		cache_write_tokens_sum, input_tokens_sum, output_tokens_sum,
-		completion_tokens_sum, use_time_sum
-	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		completion_tokens_sum, quota_sum, use_time_sum
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -567,7 +579,7 @@ func (s *ModelHistoryService) SaveDay(snap *daySnapshot) error {
 				st.durationTimedRequests, st.durationWithin10s, st.durationWithin20s, st.outputRequests,
 				st.claudeRequests, st.cacheDenominatorSum, st.cacheTokensSum, st.cacheWriteSum,
 				st.cacheWriteTokensSum, st.inputTokensSum, st.outputTokensSum,
-				st.completionTokensSum, st.useTimeSum,
+				st.completionTokensSum, st.quotaSum, st.useTimeSum,
 			); err != nil {
 				return err
 			}
@@ -580,8 +592,8 @@ func (s *ModelHistoryService) SaveDay(snap *daySnapshot) error {
 		duration_within_10s, duration_within_20s, output_requests, claude_requests,
 		cache_denominator_sum, cache_tokens_sum, cache_write_sum,
 		cache_write_tokens_sum, input_tokens_sum, output_tokens_sum,
-		completion_tokens_sum, use_time_sum
-	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		completion_tokens_sum, quota_sum, use_time_sum
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -595,7 +607,7 @@ func (s *ModelHistoryService) SaveDay(snap *daySnapshot) error {
 					c.durationWithin10s, c.durationWithin20s, c.outputRequests, c.claudeRequests,
 					c.cacheDenominatorSum, c.cacheTokensSum, c.cacheWriteSum,
 					c.cacheWriteTokensSum, c.inputTokensSum, c.outputTokensSum,
-					c.completionTokensSum, c.useTimeSum,
+					c.completionTokensSum, c.quotaSum, c.useTimeSum,
 				); err != nil {
 					return err
 				}
@@ -630,6 +642,7 @@ func perfSummaryFromDaily(st *dailyPerfStats) map[string]interface{} {
 		st.outputTokensSum,
 		st.completionTokensSum,
 		st.useTimeSum,
+		st.quotaSum,
 	)
 }
 
@@ -664,7 +677,7 @@ func (s *ModelHistoryService) getModelSummaryRow(date, modelName string) (*daily
 		duration_within_10s, duration_within_20s, output_requests, claude_requests,
 		cache_denominator_sum, cache_tokens_sum, cache_write_sum,
 		cache_write_tokens_sum, input_tokens_sum, output_tokens_sum,
-		completion_tokens_sum, use_time_sum, start_time
+		completion_tokens_sum, quota_sum, use_time_sum, start_time
 		FROM model_daily_summary WHERE date = ? AND model_name = ?`, date, modelName)
 	st := &dailyPerfStats{}
 	var startTS int64
@@ -673,7 +686,7 @@ func (s *ModelHistoryService) getModelSummaryRow(date, modelName string) (*daily
 		&st.durationWithin10s, &st.durationWithin20s, &st.outputRequests, &st.claudeRequests,
 		&st.cacheDenominatorSum, &st.cacheTokensSum, &st.cacheWriteSum,
 		&st.cacheWriteTokensSum, &st.inputTokensSum, &st.outputTokensSum,
-		&st.completionTokensSum, &st.useTimeSum, &startTS)
+		&st.completionTokensSum, &st.quotaSum, &st.useTimeSum, &startTS)
 	if err == sql.ErrNoRows {
 		return nil, 0, false, nil
 	}
@@ -690,7 +703,7 @@ func (s *ModelHistoryService) getModelSlots(date, modelName string) (map[int]*sl
 		duration_within_10s, duration_within_20s, output_requests, claude_requests,
 		cache_denominator_sum, cache_tokens_sum, cache_write_sum,
 		cache_write_tokens_sum, input_tokens_sum, output_tokens_sum,
-		completion_tokens_sum, use_time_sum
+		completion_tokens_sum, quota_sum, use_time_sum
 		FROM model_hourly_slot WHERE date = ? AND model_name = ?`, date, modelName)
 	if err != nil {
 		return nil, err
@@ -706,7 +719,7 @@ func (s *ModelHistoryService) getModelSlots(date, modelName string) (map[int]*sl
 			&c.durationWithin10s, &c.durationWithin20s, &c.outputRequests, &c.claudeRequests,
 			&c.cacheDenominatorSum, &c.cacheTokensSum, &c.cacheWriteSum,
 			&c.cacheWriteTokensSum, &c.inputTokensSum, &c.outputTokensSum,
-			&c.completionTokensSum, &c.useTimeSum,
+			&c.completionTokensSum, &c.quotaSum, &c.useTimeSum,
 		); err != nil {
 			return nil, err
 		}
@@ -780,6 +793,7 @@ func (s *ModelHistoryService) buildModelStatusFromHistory(date, modelName string
 		"timed_requests":           perf["timed_requests"],
 		"duration_timed_requests":  perf["duration_timed_requests"],
 		"output_requests":          perf["output_requests"],
+		"total_quota":              perf["total_quota"],
 		"slot_data":                slotData,
 	}, nil
 }
@@ -805,7 +819,7 @@ func (s *ModelHistoryService) GetChannelPerformanceByDate(date string) ([]map[st
 		within_5s, within_10s, duration_timed_requests, duration_within_10s, duration_within_20s,
 		output_requests, claude_requests, cache_denominator_sum, cache_tokens_sum, cache_write_sum,
 		cache_write_tokens_sum, input_tokens_sum, output_tokens_sum,
-		completion_tokens_sum, use_time_sum
+		completion_tokens_sum, quota_sum, use_time_sum
 		FROM model_daily_channel WHERE date = ? ORDER BY total_requests DESC`, date)
 	if err != nil {
 		return nil, err
@@ -826,7 +840,7 @@ func (s *ModelHistoryService) GetChannelPerformanceByDate(date string) ([]map[st
 			&st.within5s, &st.within10s, &st.durationTimedRequests, &st.durationWithin10s, &st.durationWithin20s,
 			&st.outputRequests, &st.claudeRequests, &st.cacheDenominatorSum, &st.cacheTokensSum, &st.cacheWriteSum,
 			&st.cacheWriteTokensSum, &st.inputTokensSum, &st.outputTokensSum,
-			&st.completionTokensSum, &st.useTimeSum); err != nil {
+			&st.completionTokensSum, &st.quotaSum, &st.useTimeSum); err != nil {
 			return nil, err
 		}
 		ordered = append(ordered, chanRow{id: id, name: name, st: st})
@@ -883,6 +897,7 @@ func (s *ModelHistoryService) GetChannelPerformanceByDate(date string) ([]map[st
 			"timed_requests":           perf["timed_requests"],
 			"duration_timed_requests":  perf["duration_timed_requests"],
 			"output_requests":          perf["output_requests"],
+			"total_quota":              perf["total_quota"],
 			"slot_data":                buildAvailabilitySlotData(s.getChannelSlots(date, item.id), dayStartTimestamp(date), historySlotSeconds, historySlotCount),
 		})
 	}
@@ -933,7 +948,7 @@ func (s *ModelHistoryService) getChannelModelSlots(date string, channelID int64,
 		duration_within_10s, duration_within_20s, output_requests, claude_requests,
 		cache_denominator_sum, cache_tokens_sum, cache_write_sum,
 		cache_write_tokens_sum, input_tokens_sum, output_tokens_sum,
-		completion_tokens_sum, use_time_sum
+		completion_tokens_sum, quota_sum, use_time_sum
 		FROM channel_model_hourly_slot WHERE date = ? AND channel_id = ? AND model_name = ?`, date, channelID, modelName)
 	if err != nil {
 		return map[int]*slotCounts{}
@@ -950,7 +965,7 @@ func (s *ModelHistoryService) getChannelModelSlots(date string, channelID int64,
 			&c.durationWithin10s, &c.durationWithin20s, &c.outputRequests, &c.claudeRequests,
 			&c.cacheDenominatorSum, &c.cacheTokensSum, &c.cacheWriteSum,
 			&c.cacheWriteTokensSum, &c.inputTokensSum, &c.outputTokensSum,
-			&c.completionTokensSum, &c.useTimeSum,
+			&c.completionTokensSum, &c.quotaSum, &c.useTimeSum,
 		); err != nil {
 			return map[int]*slotCounts{}
 		}
@@ -1011,6 +1026,7 @@ func buildHistoryChannelModelResult(date string, channelID int64, channelName st
 		"timed_requests":           perf["timed_requests"],
 		"duration_timed_requests":  perf["duration_timed_requests"],
 		"output_requests":          perf["output_requests"],
+		"total_quota":              perf["total_quota"],
 		"slot_data":                buildAvailabilitySlotData(slots, dayStartTimestamp(date), historySlotSeconds, historySlotCount),
 	}
 }
@@ -1058,7 +1074,7 @@ func (s *ModelHistoryService) GetChannelModelPerformanceByDate(date string, chan
 		duration_within_10s, duration_within_20s, output_requests, claude_requests,
 		cache_denominator_sum, cache_tokens_sum, cache_write_sum,
 		cache_write_tokens_sum, input_tokens_sum, output_tokens_sum,
-		completion_tokens_sum, use_time_sum
+		completion_tokens_sum, quota_sum, use_time_sum
 		FROM model_daily_channel_model
 		WHERE date = ? AND channel_id = ?
 		ORDER BY total_requests DESC, model_name ASC
@@ -1082,7 +1098,7 @@ func (s *ModelHistoryService) GetChannelModelPerformanceByDate(date string, chan
 			&st.within5s, &st.within10s, &st.durationTimedRequests, &st.durationWithin10s, &st.durationWithin20s,
 			&st.outputRequests, &st.claudeRequests, &st.cacheDenominatorSum, &st.cacheTokensSum, &st.cacheWriteSum,
 			&st.cacheWriteTokensSum, &st.inputTokensSum, &st.outputTokensSum,
-			&st.completionTokensSum, &st.useTimeSum); err != nil {
+			&st.completionTokensSum, &st.quotaSum, &st.useTimeSum); err != nil {
 			return nil, err
 		}
 		ordered = append(ordered, modelRow{name: modelName, st: st})
@@ -1116,7 +1132,7 @@ func (s *ModelHistoryService) getChannelSlots(date string, channelID int64) map[
 		duration_within_10s, duration_within_20s, output_requests, claude_requests,
 		cache_denominator_sum, cache_tokens_sum, cache_write_sum,
 		cache_write_tokens_sum, input_tokens_sum, output_tokens_sum,
-		completion_tokens_sum, use_time_sum
+		completion_tokens_sum, quota_sum, use_time_sum
 		FROM channel_hourly_slot WHERE date = ? AND channel_id = ?`, date, channelID)
 	if err != nil {
 		return map[int]*slotCounts{}
@@ -1133,7 +1149,7 @@ func (s *ModelHistoryService) getChannelSlots(date string, channelID int64) map[
 			&c.durationWithin10s, &c.durationWithin20s, &c.outputRequests, &c.claudeRequests,
 			&c.cacheDenominatorSum, &c.cacheTokensSum, &c.cacheWriteSum,
 			&c.cacheWriteTokensSum, &c.inputTokensSum, &c.outputTokensSum,
-			&c.completionTokensSum, &c.useTimeSum,
+			&c.completionTokensSum, &c.quotaSum, &c.useTimeSum,
 		); err != nil {
 			return map[int]*slotCounts{}
 		}
@@ -1153,4 +1169,174 @@ func dayStartTimestamp(date string) int64 {
 		return 0
 	}
 	return t.Unix()
+}
+
+// GetChannelCostTrends returns per-channel daily cost (quota) for a date range
+// with optional week-over-week or month-over-month comparison.
+func (s *ModelHistoryService) GetChannelCostTrends(days int, compareMode string) (map[string]interface{}, error) {
+	now := time.Now()
+	// Generate date strings for current period
+	dates := make([]string, days)
+	for i := 0; i < days; i++ {
+		dates[i] = now.AddDate(0, 0, -days+1+i).Format("2006-01-02")
+	}
+
+	// Query all channel data for current dates
+	currentByChannel, channelNames, err := s.queryChannelCostForDates(dates)
+	if err != nil {
+		return nil, err
+	}
+
+	if compareMode == "" {
+		channels := s.buildChannelCostTrends(currentByChannel, channelNames, dates, nil, nil)
+		return map[string]interface{}{"channels": channels}, nil
+	}
+
+	// Comparison mode
+	offsetDays := 7
+	if compareMode == "month" {
+		offsetDays = 30
+	}
+
+	prevDates := make([]string, days)
+	for i := 0; i < days; i++ {
+		prevDates[i] = now.AddDate(0, 0, -days+1+i-offsetDays).Format("2006-01-02")
+	}
+
+	prevByChannel, _, err := s.queryChannelCostForDates(prevDates)
+	if err != nil {
+		return nil, err
+	}
+
+	comparison := make(map[int64][]map[string]interface{})
+	for chID, curData := range currentByChannel {
+		prevData := prevByChannel[chID]
+		comp := make([]map[string]interface{}, days)
+		for i := 0; i < days; i++ {
+			curVal := int64(0)
+			prevVal := int64(0)
+			if i < len(curData) {
+				curVal = toInt64(curData[i]["total_quota"])
+			}
+			if i < len(prevData) {
+				prevVal = toInt64(prevData[i]["total_quota"])
+			}
+			entry := map[string]interface{}{"date": dates[i]}
+			if prevVal > 0 {
+				entry["total_quota_change"] = math.Round(float64(curVal-prevVal)/float64(prevVal)*10000) / 100
+			}
+			comp[i] = entry
+		}
+		comparison[chID] = comp
+	}
+
+	channels := s.buildChannelCostTrends(currentByChannel, channelNames, dates, prevByChannel, comparison)
+
+	modeLabel := "week_over_week"
+	if compareMode == "month" {
+		modeLabel = "month_over_month"
+	}
+
+	return map[string]interface{}{
+		"channels":      channels,
+		"compare_mode":  modeLabel,
+		"compare_offset": offsetDays,
+	}, nil
+}
+
+// queryChannelCostForDates queries model_daily_channel for a list of dates
+// and returns data keyed by channel_id, plus channel name mapping.
+func (s *ModelHistoryService) queryChannelCostForDates(dates []string) (map[int64][]map[string]interface{}, map[int64]string, error) {
+	if len(dates) == 0 {
+		return nil, nil, nil
+	}
+
+	placeholders := make([]string, len(dates))
+	args := make([]interface{}, len(dates))
+	for i, d := range dates {
+		placeholders[i] = "?"
+		args[i] = d
+	}
+
+	query := fmt.Sprintf(`SELECT date, channel_id, channel_name,
+			quota_sum as total_quota,
+			COALESCE(input_tokens_sum, 0) + COALESCE(output_tokens_sum, 0) as total_tokens,
+			total_requests
+		FROM model_daily_channel
+		WHERE date IN (%s)
+		ORDER BY channel_id, date ASC`, strings.Join(placeholders, ","))
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+
+	byChannel := make(map[int64][]map[string]interface{})
+	channelNames := make(map[int64]string)
+
+	for rows.Next() {
+		var date, channelName string
+		var channelID, totalRequests int64
+		var quota, totalTokens float64
+		if err := rows.Scan(&date, &channelID, &channelName, &quota, &totalTokens, &totalRequests); err != nil {
+			return nil, nil, err
+		}
+		byChannel[channelID] = append(byChannel[channelID], map[string]interface{}{
+			"date":           date,
+			"total_quota":    int64(math.Round(quota)),
+			"total_tokens":   int64(math.Round(totalTokens)),
+			"total_requests": totalRequests,
+		})
+		if _, ok := channelNames[channelID]; !ok && channelName != "" {
+			channelNames[channelID] = channelName
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	return byChannel, channelNames, nil
+}
+
+// buildChannelCostTrends builds the per-channel cost trend response.
+func (s *ModelHistoryService) buildChannelCostTrends(
+	currentByChannel map[int64][]map[string]interface{},
+	channelNames map[int64]string,
+	dates []string,
+	prevByChannel map[int64][]map[string]interface{},
+	comparison map[int64][]map[string]interface{},
+) []map[string]interface{} {
+	channels := make([]map[string]interface{}, 0, len(currentByChannel))
+	for chID, curData := range currentByChannel {
+		name := channelNames[chID]
+		if name == "" {
+			name = fmt.Sprintf("Channel#%d", chID)
+		}
+		entry := map[string]interface{}{
+			"channel_id":   chID,
+			"channel_name": name,
+			"current":      curData,
+		}
+		if prevByChannel != nil {
+			entry["previous"] = prevByChannel[chID]
+		}
+		if comparison != nil {
+			entry["comparison"] = comparison[chID]
+		}
+		channels = append(channels, entry)
+	}
+	// Sort by total cost descending
+	sort.Slice(channels, func(i, j int) bool {
+		sumI := int64(0)
+		for _, d := range channels[i]["current"].([]map[string]interface{}) {
+			sumI += toInt64(d["total_quota"])
+		}
+		sumJ := int64(0)
+		for _, d := range channels[j]["current"].([]map[string]interface{}) {
+			sumJ += toInt64(d["total_quota"])
+		}
+		return sumI > sumJ
+	})
+	return channels
 }

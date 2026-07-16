@@ -1,11 +1,16 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from './Toast'
-import { TrendChart } from './TrendChart'
+import { SpendAnalytics } from './SpendAnalytics'
 import { Users, Key, Server, Box, Ticket, Zap, Crown, Loader2, RefreshCw, Activity, BarChart3, Clock, Database, Timer, ChevronDown, Hash, ArrowDownToLine, ArrowUpFromLine } from 'lucide-react'
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from './ui/card'
+import { Card, CardContent } from './ui/card'
 import { Button } from './ui/button'
 import { cn } from '../lib/utils'
+import { formatCostPrecise, formatNumber } from '../lib/format'
+import { mockDashboardData } from './mockData'
+
+// Set to true to use mock data without connecting to backend
+const USE_MOCK = !import.meta.env.VITE_API_URL
 
 type RefreshInterval = 0 | 30 | 60 | 120 | 300 // 秒，0表示关闭
 
@@ -30,20 +35,16 @@ interface UsageStatistics {
   average_response_time: number
 }
 
-interface ModelUsage {
-  model_name: string
-  request_count: number
-  quota_used: number
-  prompt_tokens: number
-  completion_tokens: number
-}
-
 interface DailyTrend {
   date?: string
   hour?: string
   request_count: number
   quota_used: number
   unique_users?: number
+  prompt_tokens?: number
+  completion_tokens?: number
+  cache_hit_tokens?: number
+  cache_write_tokens?: number
 }
 
 interface AnalyticsSummary {
@@ -76,19 +77,19 @@ interface RefreshEstimate {
   warning?: string
 }
 
-type PeriodType = '24h' | '3d' | '7d' | '14d'
+type PeriodType = 'today' | 'week' | 'month'
 
 export function Dashboard() {
   const { token } = useAuth()
   const { showToast } = useToast()
   const [overview, setOverview] = useState<SystemOverview | null>(null)
   const [usage, setUsage] = useState<UsageStatistics | null>(null)
-  const [models, setModels] = useState<ModelUsage[]>([])
   const [dailyTrends, setDailyTrends] = useState<DailyTrend[]>([])
   const [analyticsSummary, setAnalyticsSummary] = useState<AnalyticsSummary | null>(null)
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
-  const [period, setPeriod] = useState<PeriodType>('24h')
+  // 固定「当天 · 按小时」视角(不再提供 today/week/month 切换)
+  const [period] = useState<PeriodType>('today')
   const [loadError, setLoadError] = useState<string | null>(null)
 
   const DASHBOARD_REFRESH_KEY = 'dashboard_refresh_interval'
@@ -121,6 +122,48 @@ export function Dashboard() {
     'Authorization': `Bearer ${token}`,
   }), [token])
 
+  // ---- Mock helpers ----
+  const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
+
+  const mockOverview = useCallback(async () => {
+    await delay(200)
+    setOverview(mockDashboardData.overview)
+    return true
+  }, [])
+
+  const mockUsage = useCallback(async () => {
+    await delay(150)
+    setUsage(mockDashboardData.usage)
+    return true
+  }, [])
+
+  const mockTrends = useCallback(async (_noCache: boolean, _signal?: AbortSignal) => {
+    await delay(200)
+    setDailyTrends(mockDashboardData.getToday())
+    return true
+  }, [])
+
+  const mockAnalyticsSummary = useCallback(async () => {
+    await delay(100)
+    const sortedByRequest = [...mockDashboardData.topUsers].sort((a, b) => b.request_count - a.request_count)
+    const sortedByQuota = [...mockDashboardData.topUsers].sort((a, b) => b.quota_used - a.quota_used)
+    setAnalyticsSummary({
+      request_king: sortedByRequest.length > 0 ? {
+        user_id: sortedByRequest[0].user_id,
+        username: sortedByRequest[0].username,
+        request_count: sortedByRequest[0].request_count,
+      } : null,
+      quota_king: sortedByQuota.length > 0 ? {
+        user_id: sortedByQuota[0].user_id,
+        username: sortedByQuota[0].username,
+        quota_used: sortedByQuota[0].quota_used,
+      } : null,
+    })
+    return true
+  }, [])
+
+  // ---- End mock helpers ----
+
   const fetchOverview = useCallback(async (noCache = false, signal?: AbortSignal): Promise<boolean> => {
     try {
       const cacheParam = noCache ? '&no_cache=true' : ''
@@ -149,43 +192,22 @@ export function Dashboard() {
     return false
   }, [apiUrl, getAuthHeaders, period])
 
-  const fetchModels = useCallback(async (noCache = false, signal?: AbortSignal): Promise<boolean> => {
-    try {
-      const cacheParam = noCache ? '&no_cache=true' : ''
-      const response = await fetch(
-        `${apiUrl}/api/dashboard/models?period=${period}&limit=8${cacheParam}`,
-        { headers: getAuthHeaders(), signal },
-      )
-      const data = await response.json()
-      if (data.success) setModels(data.data)
-      return true
-    } catch (error) { console.error('Failed to fetch models:', error) }
-    return false
-  }, [apiUrl, getAuthHeaders, period])
-
+  // 当天按小时趋势(用于「花费分析」双面板图:每小时花费折线 + token 组成堆叠柱)
   const fetchTrends = useCallback(async (noCache = false, signal?: AbortSignal): Promise<boolean> => {
     try {
       const cacheParam = noCache ? '&no_cache=true' : ''
-      let response
-      if (period === '24h') {
-        // 24小时使用小时级数据
-        response = await fetch(
-          `${apiUrl}/api/dashboard/trends/hourly?hours=24${cacheParam}`,
-          { headers: getAuthHeaders(), signal },
-        )
-      } else {
-        const days = period === '3d' ? 3 : period === '7d' ? 7 : 14
-        response = await fetch(
-          `${apiUrl}/api/dashboard/trends/daily?days=${days}${cacheParam}`,
-          { headers: getAuthHeaders(), signal },
-        )
-      }
+      const response = await fetch(
+        `${apiUrl}/api/dashboard/trends/hourly?hours=24${cacheParam}`,
+        { headers: getAuthHeaders(), signal },
+      )
       const data = await response.json()
-      if (data.success) setDailyTrends(data.data)
+      if (data.success) {
+        setDailyTrends(data.data)
+      }
       return true
     } catch (error) { console.error('Failed to fetch trends:', error) }
     return false
-  }, [apiUrl, getAuthHeaders, period])
+  }, [apiUrl, getAuthHeaders])
 
   const fetchAnalyticsSummary = useCallback(async (noCache = false, signal?: AbortSignal): Promise<boolean> => {
     try {
@@ -221,26 +243,36 @@ export function Dashboard() {
   }, [apiUrl, getAuthHeaders, period])
 
   const fetchAll = useCallback(async (noCache = false, signal?: AbortSignal): Promise<boolean> => {
+    if (USE_MOCK) {
+      const results = await Promise.all([
+        mockOverview(), mockUsage(), mockTrends(noCache, signal), mockAnalyticsSummary(),
+      ])
+      return results.every(Boolean)
+    }
     const results = await Promise.all([
       fetchOverview(noCache, signal),
       fetchUsage(noCache, signal),
-      fetchModels(noCache, signal),
       fetchTrends(noCache, signal),
       fetchAnalyticsSummary(noCache, signal),
     ])
     return results.every(Boolean)
-  }, [fetchOverview, fetchUsage, fetchModels, fetchTrends, fetchAnalyticsSummary])
+  }, [fetchOverview, fetchUsage, fetchTrends, fetchAnalyticsSummary, mockOverview, mockUsage, mockTrends, mockAnalyticsSummary])
 
   const refreshAll = useCallback(async (signal?: AbortSignal): Promise<boolean> => {
+    if (USE_MOCK) {
+      const results = await Promise.all([
+        mockOverview(), mockUsage(), mockTrends(true, signal), mockAnalyticsSummary(),
+      ])
+      return results.every(Boolean)
+    }
     const results = await Promise.all([
       fetchOverview(true, signal),
       fetchUsage(true, signal),
-      fetchModels(true, signal),
       fetchTrends(true, signal),
       fetchAnalyticsSummary(true, signal),
     ])
     return results.every(Boolean)
-  }, [fetchOverview, fetchUsage, fetchModels, fetchTrends, fetchAnalyticsSummary])
+  }, [fetchOverview, fetchUsage, fetchTrends, fetchAnalyticsSummary, mockOverview, mockUsage, mockTrends, mockAnalyticsSummary])
 
   // 获取系统规模信息（仅首次加载）
   const fetchSystemInfo = useCallback(async () => {
@@ -449,12 +481,7 @@ export function Dashboard() {
     }
   }
 
-  const formatQuota = (quota: number) => `$${(quota / 500000).toFixed(2)}`
-  const formatNumber = (num: number) => {
-    return num.toLocaleString('zh-CN')
-  }
-  const getMaxValue = (data: number[]) => Math.max(...data, 1)
-  const getPeriodLabel = () => period === '24h' ? '24小时' : period === '3d' ? '3天' : period === '7d' ? '7天' : '14天'
+  const getPeriodLabel = () => period === 'today' ? '当天' : period === 'week' ? '本周' : '本月'
 
   if (loading) {
     return (
@@ -614,21 +641,6 @@ export function Dashboard() {
               )}
             </div>
           </div>
-
-          {/* 时间范围选择 */}
-          <div className="inline-flex rounded-lg border bg-muted/50 p-1">
-            {(['24h', '3d', '7d', '14d'] as PeriodType[]).map((p) => (
-              <Button
-                key={p}
-                variant={period === p ? 'default' : 'ghost'}
-                size="sm"
-                onClick={() => { setDailyTrends([]); setPeriod(p) }}
-                className="h-7 text-xs px-3"
-              >
-                {p === '24h' ? '24小时' : p === '3d' ? '3天' : p === '7d' ? '7天' : '14天'}
-              </Button>
-            ))}
-          </div>
         </div>
       </div>
 
@@ -694,7 +706,7 @@ export function Dashboard() {
           />
           <StatCard
             title="消耗额度"
-            value={formatQuota(usage?.total_quota_used || 0)}
+            value={formatCostPrecise(usage?.total_quota_used || 0)}
             rawValue={usage?.total_quota_used ? usage.total_quota_used / 500000 : 0}
             icon={Zap}
             color="amber"
@@ -735,55 +747,11 @@ export function Dashboard() {
       </section>
 
 
-      {/* Main Charts Area */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-stretch">
-        {/* Daily Trends Chart */}
-        <div className="flex flex-col h-full">
-          <TrendChart data={dailyTrends} period={period} loading={loading} totalRequests={Number(usage?.total_requests || 0)} />
-        </div>
-
-        {/* Model Usage List */}
-        <Card className="col-span-1 shadow-sm hover:shadow-md transition-shadow duration-200 flex flex-col h-full">
-          <CardHeader>
-            <CardTitle className="text-lg flex items-center gap-2">
-              <Box className="w-5 h-5 text-muted-foreground" />
-              模型使用分布
-            </CardTitle>
-            <CardDescription>{getPeriodLabel()}内 Top 8 活跃模型</CardDescription>
-          </CardHeader>
-          <CardContent className="flex-1 overflow-hidden">
-            {models.length > 0 ? (
-              <div className="h-full flex flex-col justify-around min-h-[300px] py-2">
-                {models.map((model, index) => {
-                  const maxRequests = getMaxValue(models.map(m => m.request_count))
-                  const percentage = (model.request_count / maxRequests) * 100
-                  const colors = ['bg-blue-500', 'bg-emerald-500', 'bg-purple-500', 'bg-orange-500', 'bg-pink-500', 'bg-cyan-500', 'bg-yellow-500', 'bg-rose-500']
-                  return (
-                    <div key={index} className="space-y-1 group">
-                      <div className="flex justify-between text-xs sm:text-sm items-center">
-                        <span className="font-medium truncate max-w-[150px] sm:max-w-[200px]" title={model.model_name}>
-                          {model.model_name}
-                        </span>
-                        <span className="text-muted-foreground tabular-nums">{formatNumber(model.request_count)}</span>
-                      </div>
-                      <div className="h-1.5 w-full bg-secondary rounded-full overflow-hidden">
-                        <div
-                          className={`h-full rounded-full transition-all duration-700 ease-out ${colors[index % colors.length]}`}
-                          style={{ width: `${percentage}%` }}
-                        />
-                      </div>
-                    </div>
-                  )
-                })}
-              </div>
-            ) : (
-              <div className="h-full min-h-[300px] flex items-center justify-center text-muted-foreground bg-muted/20 rounded-lg">
-                暂无数据
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      </div>
+      {/* Spend Analytics — 当天按小时:上「每小时花费折线」+ 下「Token 组成堆叠柱」,共用小时横轴 */}
+      <SpendAnalytics
+        dailyTrends={dailyTrends}
+        loading={loading}
+      />
 
       {/* Analytics Kings */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">

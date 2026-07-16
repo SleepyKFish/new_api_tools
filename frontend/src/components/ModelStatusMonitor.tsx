@@ -11,6 +11,7 @@ import { Button } from './ui/button'
 import { Badge } from './ui/badge'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from './ui/dialog'
 import { useClickOutside } from '../hooks/useClickOutside'
+import { mockModelStatus } from './mockData'
 import {
   OpenAI, Gemini, DeepSeek, SiliconCloud, Groq, Ollama, Claude, Mistral,
   Minimax, Baichuan, Moonshot, Spark, Qwen, Yi, Hunyuan, Stepfun, ZeroOne,
@@ -68,6 +69,7 @@ interface ModelStatus {
   cache_write_tokens: number
   total_input_tokens: number
   total_output_tokens: number
+  total_quota: number
   completion_tps: number | null
   timed_requests: number
   duration_timed_requests: number
@@ -104,6 +106,7 @@ interface ChannelPerformance {
   cache_write_tokens: number
   total_input_tokens: number
   total_output_tokens: number
+  total_quota: number
   completion_tps: number | null
   timed_requests: number
   duration_timed_requests: number
@@ -637,6 +640,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
   const modelCardsSectionRef = useRef<HTMLDivElement>(null)
 
   const apiUrl = import.meta.env.VITE_API_URL || ''
+  const MOCK_MODE = !import.meta.env.VITE_API_URL
 
   const getAuthHeaders = useCallback((): Record<string, string> => {
     if (isEmbed) {
@@ -855,6 +859,10 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
 
   // 加载令牌分组列表
   const fetchTokenGroups = useCallback(async () => {
+    if (MOCK_MODE) {
+      setTokenGroups(mockModelStatus.getTokenGroups())
+      return
+    }
     try {
       const response = await fetch(`${apiUrl}${getApiPrefix()}/token-groups`, {
         headers: getAuthHeaders(),
@@ -892,6 +900,14 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
 
   // Fetch available models and load config
   const fetchAvailableModels = useCallback(async () => {
+    if (MOCK_MODE) {
+      const models = mockModelStatus.getAvailableModels()
+      setAvailableModels(models)
+      const defaultModels = models.filter(m => m.request_count_24h > 0).map(m => m.model_name).slice(0, 8)
+      setSelectedModels(defaultModels)
+      setInitialLoading(false)
+      return
+    }
     try {
       const response = await fetch(`${apiUrl}${getApiPrefix()}/models`, {
         headers: getAuthHeaders(),
@@ -989,6 +1005,25 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
   }, [apiUrl, getApiPrefix, getAuthHeaders, timeWindow, isEmbed, showToast, isHistory, selectedDate])
 
   const fetchChannelModelDetails = useCallback(async (channelId: number, offset = 0) => {
+    if (MOCK_MODE) {
+      await new Promise(r => setTimeout(r, 100))
+      const detail = mockModelStatus.getChannelModelPerformance(channelId) as any
+      setChannelModelDetails(prev => ({
+        ...prev,
+        [channelId]: {
+          data: detail.data,
+          total: detail.total,
+          limit: detail.limit,
+          offset: detail.offset,
+          has_more: detail.has_more,
+          loading: false,
+          loadingMore: false,
+          error: undefined,
+          detailNotBuilt: false,
+        },
+      }))
+      return
+    }
     setChannelModelDetails(prev => {
       const current = prev[channelId]
       return {
@@ -1109,6 +1144,15 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
   }, [timeWindow, selectedDate, isHistory])
 
   const fetchRealtimePerformanceSummary = useCallback(async (forceRefresh = false) => {
+    if (MOCK_MODE) {
+      await new Promise(r => setTimeout(r, 150))
+      const summary = mockModelStatus.getPerformanceSummary(timeWindow) as any
+      setModelStatuses(summary.models as any)
+      setChannelSummaries(summary.channels)
+      setInitialLoading(false)
+      setLoading(false)
+      return
+    }
     if (forceRefresh) {
       setRefreshing(true)
     }
@@ -2169,6 +2213,7 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
                           cacheWriteTokens={channel.cache_write_tokens}
                           inputTokens={channel.total_input_tokens}
                           outputTokens={channel.total_output_tokens}
+                          totalQuota={channel.total_quota}
                         />
                       </div>
 
@@ -3330,6 +3375,7 @@ function TopStackedStats({
   cacheWriteTokens,
   inputTokens,
   outputTokens,
+  totalQuota,
 }: {
   successCount: number
   successClassName: string
@@ -3344,6 +3390,7 @@ function TopStackedStats({
   cacheWriteTokens: number
   inputTokens: number
   outputTokens: number
+  totalQuota: number
 }) {
   const cacheHit = formatTokenRatio(cacheHitTokens, inputTokens)
   const cacheWrite = formatTokenRatio(cacheWriteTokens, inputTokens)
@@ -3421,6 +3468,10 @@ function TopStackedStats({
     {
       title: total.full,
       content: <span className="inline-flex items-baseline gap-1"><span className="text-muted-foreground/70">总量</span><span className="font-semibold text-sky-600 dark:text-sky-400">{total.compact}</span></span>,
+    },
+    {
+      title: `花费 ¥${(totalQuota / 500000).toFixed(2)}`,
+      content: <span className="inline-flex items-baseline gap-1"><span className="text-muted-foreground/70">花费</span><span className="font-semibold text-rose-600 dark:text-rose-400">¥{(totalQuota / 500000).toFixed(2)}</span></span>,
     },
   ]
 
@@ -3680,6 +3731,7 @@ function ModelStatusCard({ model, isDraggable, channelId }: ModelStatusCardProps
             cacheWriteTokens={model.cache_write_tokens}
             inputTokens={model.total_input_tokens}
             outputTokens={model.total_output_tokens}
+            totalQuota={model.total_quota}
           />
         </div>
 

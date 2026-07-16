@@ -64,6 +64,7 @@ func RegisterModelStatusRoutes(r *gin.RouterGroup) {
 		g.GET("/history/channels/performance", GetHistoryChannelPerformance)
 		g.GET("/history/channels/:channel_id/models/performance", GetHistoryChannelModelPerformance)
 		g.POST("/history/backfill", BackfillHistoryDay)
+		g.GET("/channels/cost-trends", GetChannelCostTrends)
 	}
 
 }
@@ -772,4 +773,30 @@ func BackfillHistoryDay(c *gin.Context) {
 		"date":    date,
 		"message": "历史快照已重新生成",
 	})
+}
+
+// GET /api/model-status/channels/cost-trends?days=7&compare=week
+func GetChannelCostTrends(c *gin.Context) {
+	days, _ := strconv.Atoi(c.DefaultQuery("days", "7"))
+	if days < 1 {
+		days = 1
+	}
+	if days > 90 {
+		days = 90
+	}
+	compare := c.DefaultQuery("compare", "") // "" | "week" | "month"
+
+	hist, err := service.GetModelHistoryService()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResp("HISTORY_ERROR", err.Error(), ""))
+		return
+	}
+
+	data, err := hist.GetChannelCostTrends(days, compare)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResp("QUERY_ERROR", err.Error(), ""))
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": data})
 }

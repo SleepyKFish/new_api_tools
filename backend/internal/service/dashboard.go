@@ -207,12 +207,17 @@ func localTZOffset() int {
 	return offset
 }
 
-// GetDailyTrends returns daily usage trends
-func (s *DashboardService) GetDailyTrends(days int, noCache bool) ([]map[string]interface{}, error) {
+// GetDailyTrends returns daily usage trends.
+// compareMode: "" = no comparison, "true"/"week" = week-over-week (7d offset),
+// "month" = month-over-month (30d offset).
+func (s *DashboardService) GetDailyTrends(days int, noCache bool, compareMode string) (interface{}, error) {
 	cm := cache.Get()
 	cacheKey := fmt.Sprintf("dashboard:daily:%d", days)
+	if compareMode != "" {
+		cacheKey = fmt.Sprintf("dashboard:daily:compare:%s:%d", compareMode, days)
+	}
 	if !noCache {
-		var cached []map[string]interface{}
+		var cached interface{}
 		if found, _ := cm.GetJSON(cacheKey, &cached); found {
 			return cached, nil
 		}
@@ -222,7 +227,51 @@ func (s *DashboardService) GetDailyTrends(days int, noCache bool) ([]map[string]
 	startTime := now.AddDate(0, 0, -days).Unix()
 	tzOffset := localTZOffset()
 
-	// Group by local-time day using pure unix arithmetic — timezone-safe
+	currentRows, err := s.queryDailyTrends(startTime, days, tzOffset)
+	if err != nil {
+		return nil, err
+	}
+
+	if compareMode == "" {
+		rows := fillDailyGaps(currentRows, days, tzOffset)
+		cm.Set(cacheKey, rows, 5*time.Minute)
+		return rows, nil
+	}
+
+	// Determine compare offset and label
+	offsetDays := 7
+	modeLabel := "week_over_week"
+	if compareMode == "month" {
+		offsetDays = 30
+		modeLabel = "month_over_month"
+	}
+
+	prevStartTime := now.AddDate(0, 0, -days-offsetDays).Unix()
+	prevEndTime := now.AddDate(0, 0, -offsetDays).Unix()
+	prevRows, err := s.queryDailyTrendsRange(prevStartTime, prevEndTime, days, tzOffset)
+	if err != nil {
+		return nil, err
+	}
+
+	current := fillDailyGaps(currentRows, days, tzOffset)
+	previous := fillDailyGaps(prevRows, days, tzOffset)
+	comparison := buildDailyComparison(current, previous)
+
+	result := map[string]interface{}{
+		"current":        current,
+		"previous":       previous,
+		"comparison":     comparison,
+		"compare_mode":   modeLabel,
+		"compare_offset": offsetDays,
+	}
+
+	cm.Set(cacheKey, result, 5*time.Minute)
+	return result, nil
+}
+
+// queryDailyTrends fetches rows from the best available source (quota_data or logs)
+// for a time window starting at startUnix and spanning 'days' calendar days.
+func (s *DashboardService) queryDailyTrends(startUnix int64, days int, tzOffset int) ([]map[string]interface{}, error) {
 	dayGroupExpr := fmt.Sprintf("FLOOR((created_at + %d) / 86400)", tzOffset)
 
 	var rows []map[string]interface{}
@@ -233,43 +282,140 @@ func (s *DashboardService) GetDailyTrends(days int, noCache bool) ([]map[string]
 			SELECT %s as day_group,
 				COALESCE(SUM(count), 0) as request_count,
 				COALESCE(SUM(quota), 0) as quota_used,
-				COUNT(DISTINCT user_id) as unique_users
+				COUNT(DISTINCT user_id) as unique_users,
+				0 as prompt_tokens,
+				0 as completion_tokens,
+				0 as cache_hit_tokens,
+				0 as cache_write_tokens
 			FROM quota_data
 			WHERE created_at >= ?
 			GROUP BY %s
 			ORDER BY day_group ASC`,
 			dayGroupExpr, dayGroupExpr))
-		rows, err = s.db.QueryWithTimeout(30*time.Second, query, startTime)
+		rows, err = s.db.QueryWithTimeout(30*time.Second, query, startUnix)
 	} else {
 		query := s.db.RebindQuery(fmt.Sprintf(`
 			SELECT %s as day_group,
 				COUNT(*) as request_count,
 				COALESCE(SUM(quota), 0) as quota_used,
-				COUNT(DISTINCT user_id) as unique_users
+				COUNT(DISTINCT user_id) as unique_users,
+				COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
+				COALESCE(SUM(completion_tokens), 0) as completion_tokens,
+				COALESCE(SUM(CASE WHEN other IS NOT NULL AND other <> '' AND JSON_VALID(other)
+					THEN CAST(JSON_UNQUOTE(JSON_EXTRACT(other, '$.cache_tokens')) AS UNSIGNED)
+					ELSE 0 END), 0) as cache_hit_tokens,
+				COALESCE(SUM(CASE WHEN other IS NOT NULL AND other <> '' AND JSON_VALID(other)
+					THEN CAST(JSON_UNQUOTE(JSON_EXTRACT(other, '$.cache_write_tokens')) AS UNSIGNED)
+					ELSE 0 END), 0) as cache_write_tokens
 			FROM logs
 			WHERE created_at >= ? AND type = 2
 			GROUP BY %s
 			ORDER BY day_group ASC`,
 			dayGroupExpr, dayGroupExpr))
-		rows, err = s.db.QueryWithTimeout(30*time.Second, query, startTime)
+		rows, err = s.db.QueryWithTimeout(30*time.Second, query, startUnix)
 	}
 
-	if err != nil {
-		return nil, err
-	}
-
-	rows = fillDailyGaps(rows, days, tzOffset)
-
-	cm.Set(cacheKey, rows, 5*time.Minute)
-	return rows, nil
+	return rows, err
 }
 
-// GetHourlyTrends returns hourly usage trends
-func (s *DashboardService) GetHourlyTrends(hours int, noCache bool) ([]map[string]interface{}, error) {
+// queryDailyTrendsRange is like queryDailyTrends but constrains the window to
+// [startUnix, endUnix) so previous periods don't leak into today.
+func (s *DashboardService) queryDailyTrendsRange(startUnix, endUnix int64, days int, tzOffset int) ([]map[string]interface{}, error) {
+	dayGroupExpr := fmt.Sprintf("FLOOR((created_at + %d) / 86400)", tzOffset)
+
+	var rows []map[string]interface{}
+	var err error
+
+	if IsQuotaDataAvailable() {
+		query := s.db.RebindQuery(fmt.Sprintf(`
+			SELECT %s as day_group,
+				COALESCE(SUM(count), 0) as request_count,
+				COALESCE(SUM(quota), 0) as quota_used,
+				COUNT(DISTINCT user_id) as unique_users,
+				0 as prompt_tokens,
+				0 as completion_tokens,
+				0 as cache_hit_tokens,
+				0 as cache_write_tokens
+			FROM quota_data
+			WHERE created_at >= ? AND created_at < ?
+			GROUP BY %s
+			ORDER BY day_group ASC`,
+			dayGroupExpr, dayGroupExpr))
+		rows, err = s.db.QueryWithTimeout(30*time.Second, query, startUnix, endUnix)
+	} else {
+		query := s.db.RebindQuery(fmt.Sprintf(`
+			SELECT %s as day_group,
+				COUNT(*) as request_count,
+				COALESCE(SUM(quota), 0) as quota_used,
+				COUNT(DISTINCT user_id) as unique_users,
+				COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
+				COALESCE(SUM(completion_tokens), 0) as completion_tokens,
+				COALESCE(SUM(CASE WHEN other IS NOT NULL AND other <> '' AND JSON_VALID(other)
+					THEN CAST(JSON_UNQUOTE(JSON_EXTRACT(other, '$.cache_tokens')) AS UNSIGNED)
+					ELSE 0 END), 0) as cache_hit_tokens,
+				COALESCE(SUM(CASE WHEN other IS NOT NULL AND other <> '' AND JSON_VALID(other)
+					THEN CAST(JSON_UNQUOTE(JSON_EXTRACT(other, '$.cache_write_tokens')) AS UNSIGNED)
+					ELSE 0 END), 0) as cache_write_tokens
+			FROM logs
+			WHERE created_at >= ? AND created_at < ? AND type = 2
+			GROUP BY %s
+			ORDER BY day_group ASC`,
+			dayGroupExpr, dayGroupExpr))
+		rows, err = s.db.QueryWithTimeout(30*time.Second, query, startUnix, endUnix)
+	}
+
+	return rows, err
+}
+
+// changeRate returns the percentage change from prev to curr.
+// Returns nil when prev is 0 (avoid division by zero).
+func changeRate(curr, prev int64) interface{} {
+	if prev == 0 {
+		return nil
+	}
+	return math.Round(float64(curr-prev)/float64(prev)*10000) / 100
+}
+
+// buildDailyComparison builds per-day comparison rows with change rates.
+func buildDailyComparison(current, previous []map[string]interface{}) []map[string]interface{} {
+	// Build lookup of previous values by position (align 0..N from oldest to newest).
+	comparison := make([]map[string]interface{}, len(current))
+	for i, cur := range current {
+		dateStr := toString(cur["date"])
+		comp := map[string]interface{}{
+			"date": dateStr,
+		}
+
+		// Attach change rates for key metrics
+		curReq := toInt64(cur["request_count"])
+		curQuota := toInt64(cur["quota_used"])
+		curUsers := toInt64(cur["unique_users"])
+
+		if i < len(previous) {
+			prevReq := toInt64(previous[i]["request_count"])
+			prevQuota := toInt64(previous[i]["quota_used"])
+			prevUsers := toInt64(previous[i]["unique_users"])
+
+			comp["request_count_change"] = changeRate(curReq, prevReq)
+			comp["quota_used_change"] = changeRate(curQuota, prevQuota)
+			comp["unique_users_change"] = changeRate(curUsers, prevUsers)
+		}
+
+		comparison[i] = comp
+	}
+	return comparison
+}
+
+// GetHourlyTrends returns hourly usage trends.
+// compareMode: "" = no comparison, any non-empty = day-over-day (24h offset).
+func (s *DashboardService) GetHourlyTrends(hours int, noCache bool, compareMode string) (interface{}, error) {
 	cm := cache.Get()
 	cacheKey := fmt.Sprintf("dashboard:hourly:%d", hours)
+	if compareMode != "" {
+		cacheKey = fmt.Sprintf("dashboard:hourly:compare:%d", hours)
+	}
 	if !noCache {
-		var cached []map[string]interface{}
+		var cached interface{}
 		if found, _ := cm.GetJSON(cacheKey, &cached); found {
 			return cached, nil
 		}
@@ -278,7 +424,68 @@ func (s *DashboardService) GetHourlyTrends(hours int, noCache bool) ([]map[strin
 	startTime := time.Now().Add(-time.Duration(hours) * time.Hour).Unix()
 	tzOffset := localTZOffset()
 
-	// Group by local-time hour using pure unix arithmetic — timezone-safe
+	currentRows, err := s.queryHourlyTrends(startTime, hours, tzOffset)
+	if err != nil {
+		return nil, err
+	}
+
+	if compareMode == "" {
+		rows := fillHourlyGaps(currentRows, hours, tzOffset)
+		cm.Set(cacheKey, rows, 2*time.Minute)
+		return rows, nil
+	}
+
+	// Comparison mode: fetch previous period offset by 24h (day-over-day),
+	// so every hour compares to the same hour from yesterday.
+	prevStartTime := time.Now().Add(-time.Duration(hours+24) * time.Hour).Unix()
+	prevEndTime := time.Now().Add(-24 * time.Hour).Unix()
+	prevRows, err := s.queryHourlyTrendsRange(prevStartTime, prevEndTime, hours, tzOffset)
+	if err != nil {
+		return nil, err
+	}
+
+	current := fillHourlyGaps(currentRows, hours, tzOffset)
+	previous := fillHourlyGaps(prevRows, hours, tzOffset)
+	comparison := buildHourlyComparison(current, previous)
+
+	result := map[string]interface{}{
+		"current":      current,
+		"previous":     previous,
+		"comparison":   comparison,
+		"compare_mode": "day_over_day",
+	}
+
+	cm.Set(cacheKey, result, 2*time.Minute)
+	return result, nil
+}
+
+// queryHourlyTrends fetches hourly rows from logs table.
+func (s *DashboardService) queryHourlyTrends(startUnix int64, hours int, tzOffset int) ([]map[string]interface{}, error) {
+	hourGroupExpr := fmt.Sprintf("FLOOR((created_at + %d) / 3600)", tzOffset)
+
+	query := s.db.RebindQuery(fmt.Sprintf(`
+		SELECT %s as hour_group,
+			COUNT(*) as request_count,
+			COALESCE(SUM(quota), 0) as quota_used,
+			COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
+			COALESCE(SUM(completion_tokens), 0) as completion_tokens,
+			COALESCE(SUM(CASE WHEN other IS NOT NULL AND other <> '' AND JSON_VALID(other)
+				THEN CAST(JSON_UNQUOTE(JSON_EXTRACT(other, '$.cache_tokens')) AS UNSIGNED)
+				ELSE 0 END), 0) as cache_hit_tokens,
+			COALESCE(SUM(CASE WHEN other IS NOT NULL AND other <> '' AND JSON_VALID(other)
+				THEN CAST(JSON_UNQUOTE(JSON_EXTRACT(other, '$.cache_write_tokens')) AS UNSIGNED)
+				ELSE 0 END), 0) as cache_write_tokens
+		FROM logs
+		WHERE created_at >= ? AND type = 2
+		GROUP BY %s
+		ORDER BY hour_group ASC`,
+		hourGroupExpr, hourGroupExpr))
+
+	return s.db.QueryWithTimeout(15*time.Second, query, startUnix)
+}
+
+// queryHourlyTrendsRange is like queryHourlyTrends but constrains to [startUnix, endUnix).
+func (s *DashboardService) queryHourlyTrendsRange(startUnix, endUnix int64, hours int, tzOffset int) ([]map[string]interface{}, error) {
 	hourGroupExpr := fmt.Sprintf("FLOOR((created_at + %d) / 3600)", tzOffset)
 
 	query := s.db.RebindQuery(fmt.Sprintf(`
@@ -286,20 +493,37 @@ func (s *DashboardService) GetHourlyTrends(hours int, noCache bool) ([]map[strin
 			COUNT(*) as request_count,
 			COALESCE(SUM(quota), 0) as quota_used
 		FROM logs
-		WHERE created_at >= ? AND type = 2
+		WHERE created_at >= ? AND created_at < ? AND type = 2
 		GROUP BY %s
 		ORDER BY hour_group ASC`,
 		hourGroupExpr, hourGroupExpr))
 
-	rows, err := s.db.QueryWithTimeout(15*time.Second, query, startTime)
-	if err != nil {
-		return nil, err
+	return s.db.QueryWithTimeout(15*time.Second, query, startUnix, endUnix)
+}
+
+// buildHourlyComparison builds per-hour comparison rows with change rates.
+func buildHourlyComparison(current, previous []map[string]interface{}) []map[string]interface{} {
+	comparison := make([]map[string]interface{}, len(current))
+	for i, cur := range current {
+		hourStr := toString(cur["hour"])
+		comp := map[string]interface{}{
+			"hour": hourStr,
+		}
+
+		curReq := toInt64(cur["request_count"])
+		curQuota := toInt64(cur["quota_used"])
+
+		if i < len(previous) {
+			prevReq := toInt64(previous[i]["request_count"])
+			prevQuota := toInt64(previous[i]["quota_used"])
+
+			comp["request_count_change"] = changeRate(curReq, prevReq)
+			comp["quota_used_change"] = changeRate(curQuota, prevQuota)
+		}
+
+		comparison[i] = comp
 	}
-
-	rows = fillHourlyGaps(rows, hours, tzOffset)
-
-	cm.Set(cacheKey, rows, 2*time.Minute)
-	return rows, nil
+	return comparison
 }
 
 // GetTopUsers returns top users by quota usage (subquery-first optimization)
@@ -619,6 +843,10 @@ func fillDailyGaps(rows []map[string]interface{}, days int, tzOffset int) []map[
 				"request_count": int64(0),
 				"quota_used":    int64(0),
 				"unique_users":  int64(0),
+				"prompt_tokens":  int64(0),
+				"completion_tokens": int64(0),
+				"cache_hit_tokens":  int64(0),
+				"cache_write_tokens": int64(0),
 			})
 		}
 	}
@@ -661,6 +889,10 @@ func fillHourlyGaps(rows []map[string]interface{}, hours int, tzOffset int) []ma
 				"timestamp":     ts,
 				"request_count": int64(0),
 				"quota_used":    int64(0),
+				"prompt_tokens":  int64(0),
+				"completion_tokens": int64(0),
+				"cache_hit_tokens":  int64(0),
+				"cache_write_tokens": int64(0),
 			})
 		}
 	}

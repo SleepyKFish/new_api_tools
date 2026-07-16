@@ -31,13 +31,16 @@ const getInitialTab = (): TabType => {
 function App() {
   const { isAuthenticated, token, login, logout } = useAuth()
   const [activeTab, setActiveTab] = useState<TabType>(getInitialTab)
-  const [warmupState, setWarmupState] = useState<'checking' | 'warming' | 'ready'>('checking')
+  const [warmupState, setWarmupState] = useState<'checking' | 'warming' | 'ready'>(
+    !import.meta.env.VITE_API_URL ? 'ready' : 'checking'
+  )
 
   const apiUrl = import.meta.env.VITE_API_URL || ''
+  const MOCK_MODE = !import.meta.env.VITE_API_URL
 
-  // 检查后端预热状态
+  // 检查后端预热状态（mock 模式跳过）
   useEffect(() => {
-    if (!isAuthenticated || !token) return
+    if (!isAuthenticated || !token || MOCK_MODE) return
 
     const checkWarmupStatus = async () => {
       try {

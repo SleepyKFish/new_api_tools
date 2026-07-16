@@ -26,7 +26,16 @@ interface AuthProviderProps {
 }
 
 export function AuthProvider({ children }: AuthProviderProps) {
+  const MOCK_MODE = !import.meta.env.VITE_API_URL
+
   const [token, setToken] = useState<string | null>(() => {
+    // Mock mode: auto-login with fake token
+    if (MOCK_MODE) {
+      const fakeToken = 'mock-token-dev'
+      localStorage.setItem(TOKEN_KEY, fakeToken)
+      localStorage.setItem(TOKEN_EXPIRY_KEY, String(Date.now() + 365 * 86400 * 1000))
+      return fakeToken
+    }
     const savedToken = localStorage.getItem(TOKEN_KEY)
     const expiry = localStorage.getItem(TOKEN_EXPIRY_KEY)
 
@@ -60,6 +69,14 @@ export function AuthProvider({ children }: AuthProviderProps) {
   }, [])
 
   const login = useCallback(async (password: string): Promise<boolean> => {
+    // Mock mode: accept any password
+    if (MOCK_MODE) {
+      const fakeToken = 'mock-token-dev'
+      setToken(fakeToken)
+      localStorage.setItem(TOKEN_KEY, fakeToken)
+      localStorage.setItem(TOKEN_EXPIRY_KEY, String(Date.now() + 365 * 86400 * 1000))
+      return true
+    }
     try {
       const apiUrl = import.meta.env.VITE_API_URL || ''
       const response = await fetch(`${apiUrl}/api/auth/login`, {

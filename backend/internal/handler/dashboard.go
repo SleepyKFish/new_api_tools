@@ -74,9 +74,10 @@ func GetDailyTrends(c *gin.Context) {
 	days, _ := strconv.Atoi(c.DefaultQuery("days", "7"))
 	days = clampInt(days, 1, 90)
 	noCache := c.Query("no_cache") == "true"
+	compareMode := c.DefaultQuery("compare", "") // "" | "true" | "week" | "month"
 	svc := service.NewDashboardService()
 
-	data, err := svc.GetDailyTrends(days, noCache)
+	data, err := svc.GetDailyTrends(days, noCache, compareMode)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "error": gin.H{"message": err.Error()}})
 		return
@@ -89,9 +90,10 @@ func GetHourlyTrends(c *gin.Context) {
 	hours, _ := strconv.Atoi(c.DefaultQuery("hours", "24"))
 	hours = clampInt(hours, 1, 168)
 	noCache := c.Query("no_cache") == "true"
+	compareMode := c.DefaultQuery("compare", "") // "" | "true" → day-over-day
 	svc := service.NewDashboardService()
 
-	data, err := svc.GetHourlyTrends(hours, noCache)
+	data, err := svc.GetHourlyTrends(hours, noCache, compareMode)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "error": gin.H{"message": err.Error()}})
 		return

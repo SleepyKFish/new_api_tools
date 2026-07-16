@@ -152,7 +152,7 @@ func roundTokenCount(tokens float64) int64 {
 	return int64(math.Round(tokens))
 }
 
-func buildPerformanceSummary(totalRequests, timedRequests, outputRequests, within5s, within10s, durationTimedRequests, durationWithin10s, durationWithin20s, claudeRequests int64, cacheDenominatorSum, cacheTokensSum, cacheWriteSum, cacheWriteTokensSum, inputTokensSum, outputTokensSum, completionTokensSum, useTimeSum float64) map[string]interface{} {
+func buildPerformanceSummary(totalRequests, timedRequests, outputRequests, within5s, within10s, durationTimedRequests, durationWithin10s, durationWithin20s, claudeRequests int64, cacheDenominatorSum, cacheTokensSum, cacheWriteSum, cacheWriteTokensSum, inputTokensSum, outputTokensSum, completionTokensSum, useTimeSum, quotaSum float64) map[string]interface{} {
 	var within5sRate interface{}
 	var within10sRate interface{}
 	var durationWithin10sRate interface{}
@@ -205,6 +205,7 @@ func buildPerformanceSummary(totalRequests, timedRequests, outputRequests, withi
 		"timed_requests":           timedRequests,
 		"duration_timed_requests":  durationTimedRequests,
 		"output_requests":          outputRequests,
+		"total_quota":              roundTokenCount(quotaSum),
 	}
 }
 
@@ -508,6 +509,7 @@ type performanceStats struct {
 	claudeRequests        int64
 	completionTokensSum   float64
 	useTimeSum            float64
+	quotaSum              float64
 }
 
 // NewModelStatusService creates a new ModelStatusService
@@ -537,6 +539,7 @@ func performanceSummaryFromStats(stats *performanceStats) map[string]interface{}
 		stats.outputTokensSum,
 		stats.completionTokensSum,
 		stats.useTimeSum,
+		stats.quotaSum,
 	)
 }
 
@@ -681,6 +684,7 @@ type rowMetrics struct {
 	outputTokensSum       float64
 	completionTokensSum   float64
 	useTimeSum            float64
+	quotaSum              float64
 }
 
 // computeRowMetrics 解析一条 row(含 other JSON)一次,产出所有派生指标。
@@ -694,6 +698,7 @@ func computeRowMetrics(row map[string]interface{}, rules ErrorRuleConfig) rowMet
 	m := rowMetrics{
 		valid:     true,
 		createdAt: toInt64(row["created_at"]),
+		quotaSum:  toFloat64(row["quota"]),
 	}
 
 	completion := toFloat64(row["completion_tokens"])
@@ -865,6 +870,7 @@ func addSlotPerformanceMetrics(slot *slotCounts, m rowMetrics) {
 	slot.outputTokensSum += m.outputTokensSum
 	slot.completionTokensSum += m.completionTokensSum
 	slot.useTimeSum += m.useTimeSum
+	slot.quotaSum += m.quotaSum
 }
 
 // accumulatePerformanceMetrics 把 rowMetrics 累加进 performanceStats。
@@ -890,6 +896,7 @@ func accumulatePerformanceMetrics(stats *performanceStats, m rowMetrics) {
 	stats.outputTokensSum += m.outputTokensSum
 	stats.completionTokensSum += m.completionTokensSum
 	stats.useTimeSum += m.useTimeSum
+	stats.quotaSum += m.quotaSum
 }
 
 // accumulateDailyMetrics 把 rowMetrics 的性能派生量累加进 dailyPerfStats。
@@ -914,6 +921,7 @@ func accumulateDailyMetrics(stats *dailyPerfStats, m rowMetrics) {
 	stats.outputTokensSum += m.outputTokensSum
 	stats.completionTokensSum += m.completionTokensSum
 	stats.useTimeSum += m.useTimeSum
+	stats.quotaSum += m.quotaSum
 }
 
 func buildAvailabilitySlotData(slots map[int]*slotCounts, startTime int64, slotSeconds int64, numSlots int) []map[string]interface{} {
@@ -955,6 +963,7 @@ func buildAvailabilitySlotData(slots map[int]*slotCounts, startTime int64, slotS
 			c.outputTokensSum,
 			c.completionTokensSum,
 			c.useTimeSum,
+			c.quotaSum,
 		)
 
 		slotData = append(slotData, map[string]interface{}{
@@ -990,6 +999,7 @@ func buildAvailabilitySlotData(slots map[int]*slotCounts, startTime int64, slotS
 			"timed_requests":           perf["timed_requests"],
 			"duration_timed_requests":  perf["duration_timed_requests"],
 			"output_requests":          perf["output_requests"],
+			"total_quota":              perf["total_quota"],
 		})
 	}
 	return slotData
@@ -1314,6 +1324,7 @@ func buildModelPerformanceResult(modelName, window string, availability *availab
 		"timed_requests":           perf["timed_requests"],
 		"duration_timed_requests":  perf["duration_timed_requests"],
 		"output_requests":          perf["output_requests"],
+		"total_quota":              perf["total_quota"],
 		"slot_data":                buildAvailabilitySlotData(availability.slots, startTime, slotSeconds, numSlots),
 	}
 }
@@ -1366,6 +1377,7 @@ func buildChannelPerformanceResult(channelID int64, channelName string, availabi
 		"timed_requests":           perf["timed_requests"],
 		"duration_timed_requests":  perf["duration_timed_requests"],
 		"output_requests":          perf["output_requests"],
+		"total_quota":              perf["total_quota"],
 		"slot_data":                buildAvailabilitySlotData(availability.slots, startTime, slotSeconds, numSlots),
 	}
 }
@@ -1716,6 +1728,7 @@ func (s *ModelStatusService) GetChannelPerformanceSummaries(window string, useCa
 			"timed_requests":           perf["timed_requests"],
 			"duration_timed_requests":  perf["duration_timed_requests"],
 			"output_requests":          perf["output_requests"],
+			"total_quota":              perf["total_quota"],
 			"slot_data":                buildAvailabilitySlotData(availability.slots, startTime, slotSeconds, numSlots),
 		})
 	}
@@ -2002,6 +2015,7 @@ func (s *ModelStatusService) GetModelStatus(modelName, window string) (map[strin
 		"timed_requests":           perf["timed_requests"],
 		"duration_timed_requests":  perf["duration_timed_requests"],
 		"output_requests":          perf["output_requests"],
+		"total_quota":              perf["total_quota"],
 		"slot_data":                slotData,
 	}
 
@@ -2039,6 +2053,7 @@ func (s *ModelStatusService) GetMultipleModelsStatus(modelNames []string, window
 			status["timed_requests"] = perf["timed_requests"]
 			status["duration_timed_requests"] = perf["duration_timed_requests"]
 			status["output_requests"] = perf["output_requests"]
+			status["total_quota"] = perf["total_quota"]
 		}
 		results = append(results, status)
 	}
