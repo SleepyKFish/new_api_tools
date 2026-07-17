@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from './Toast'
 import { SpendAnalytics } from './SpendAnalytics'
+import { WeeklyPatternAnalytics } from './WeeklyPatternAnalytics'
 import { Users, Key, Server, Box, Ticket, Zap, Crown, Loader2, RefreshCw, Activity, BarChart3, Clock, Database, Timer, ChevronDown, Hash, ArrowDownToLine, ArrowUpFromLine } from 'lucide-react'
 import { Card, CardContent } from './ui/card'
 import { Button } from './ui/button'
@@ -154,6 +155,9 @@ export function Dashboard() {
   const missingHourlyRequestRef = useRef<Promise<void> | null>(null)
   const dailyTrends = mergeDailyTrends(completedHourlyTrends, currentHourlyTrends)
   const [trendsLoading, setTrendsLoading] = useState(true)
+  // 近 28 天按天趋势,供「周内规律分析」使用(独立于当天小时趋势)
+  const [weeklyTrends, setWeeklyTrends] = useState<DailyTrend[]>([])
+  const [weeklyLoading, setWeeklyLoading] = useState(true)
   const [analyticsSummary, setAnalyticsSummary] = useState<AnalyticsSummary | null>(null)
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
@@ -254,6 +258,30 @@ export function Dashboard() {
     } catch (error) { console.error('Failed to fetch usage:', error) }
     return false
   }, [apiUrl, getAuthHeaders, period])
+
+  // 近 28 天按天趋势(周内规律分析):一次性拉取,不参与小时级轮询。
+  const fetchWeeklyTrends = useCallback(async (noCache = false, signal?: AbortSignal): Promise<boolean> => {
+    try {
+      if (MOCK_MODE) {
+        await delay(180)
+        setWeeklyTrends(mockDashboardData.getDailyHistory(28))
+        return true
+      }
+      const cacheParam = noCache ? '&no_cache=true' : ''
+      const response = await fetch(
+        `${apiUrl}/api/dashboard/trends/daily?days=28${cacheParam}`,
+        { headers: getAuthHeaders(), signal },
+      )
+      const data = await response.json()
+      if (data.success && Array.isArray(data.data)) {
+        setWeeklyTrends(data.data as DailyTrend[])
+        return true
+      }
+    } catch (error) {
+      if (!signal?.aborted) console.error('Failed to fetch weekly trends:', error)
+    }
+    return false
+  }, [apiUrl, getAuthHeaders])
 
   const mergeCompletedHourlyTrends = useCallback((trends: DailyTrend[]) => {
     const completedKeys = new Set(trends.map(trendHourKey).filter(Boolean))
@@ -478,6 +506,14 @@ export function Dashboard() {
       }
     }
 
+    const loadWeekly = async () => {
+      try {
+        await fetchWeeklyTrends(false, controller.signal)
+      } finally {
+        if (active) setWeeklyLoading(false)
+      }
+    }
+
     const handleVisibilityChange = () => {
       if (document.visibilityState !== 'visible') return
       void fetchCurrentHourlyTrend(false, controller.signal)
@@ -486,6 +522,7 @@ export function Dashboard() {
 
     document.addEventListener('visibilitychange', handleVisibilityChange)
     void loadCurrentHour()
+    void loadWeekly()
     void fetchMissingCompletedHourlyTrends(controller.signal)
     scheduleNextBoundary()
 
@@ -495,7 +532,7 @@ export function Dashboard() {
       document.removeEventListener('visibilitychange', handleVisibilityChange)
       if (boundaryTimerId !== undefined) window.clearTimeout(boundaryTimerId)
     }
-  }, [fetchCurrentHourlyTrend, fetchMissingCompletedHourlyTrends, fetchPreviousHourlyTrend])
+  }, [fetchCurrentHourlyTrend, fetchMissingCompletedHourlyTrends, fetchPreviousHourlyTrend, fetchWeeklyTrends])
 
   // 获取系统规模信息（仅首次加载）
   const fetchSystemInfo = useCallback(async () => {
@@ -975,6 +1012,12 @@ export function Dashboard() {
       <SpendAnalytics
         dailyTrends={dailyTrends}
         loading={trendsLoading}
+      />
+
+      {/* Weekly Pattern — 近4周按星期几:花费 / Token / 缓存命中率 三个子图,4条线对比周与周 */}
+      <WeeklyPatternAnalytics
+        dailyTrends={weeklyTrends}
+        loading={weeklyLoading}
       />
 
       {/* Analytics Kings */}
