@@ -192,7 +192,8 @@ function buildOption(m: ChartModel): EChartsOption {
   return {
     animationDuration: 400,
     grid: [
-      { left: 72, right: 56, top: 32, height: 162 },
+      // 上图 top 从 32 → 40,给贴顶的命中率标签留出垂直空间,避免被裁切或压到 legend
+      { left: 72, right: 56, top: 40, height: 162 },
       { left: 72, right: 56, top: 262, height: 162 },
     ],
     axisPointer: {
@@ -375,9 +376,11 @@ function buildOption(m: ChartModel): EChartsOption {
         itemStyle: { color: COLOR_HIT_RATE },
         label: {
           show: true,
-          // 与花费折线对称放于线下；与花费标签错开由 labelLayout.moveOverlap 完成
-          position: 'bottom',
-          distance: 3,
+          // 命中率线常年在 85-96%,与峰值时的花费线纵向高度接近。
+          // 把命中率标签放到线上方并加大 distance(6),让它贴到图表顶部,
+          // 与花费标签（distance 3,靠近线）形成两层纵向分层,避免重叠。
+          position: 'top',
+          distance: 6,
           color: COLOR_HIT_RATE,
           fontSize: 8,
           fontWeight: 'bold',
