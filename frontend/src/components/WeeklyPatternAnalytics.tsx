@@ -278,12 +278,12 @@ function buildOption(m: ChartModel): EChartsOption {
         const headerRow = (
           `<div style="display:grid;grid-template-columns:${cols};column-gap:8px;font-size:10px;color:#94a3b8;margin-bottom:2px;align-items:center">` +
           `<span></span><span></span><span></span>` +
-          // 花费列居中——cost 值宽度差异大(¥0.66 ~ ¥29370.12),
-          // 居中后不论短长值都视觉对称,不再因位数不同而右贴边参差
+          // 4 个数值列统一居中:cost/环比/Token/命中率字符数都在 4-8 之间,
+          // 居中对齐后整列视觉对称,不再有列头右对齐、列内右对齐的错位感
           `<span style="text-align:center">花费</span>` +
-          `<span style="text-align:right">环比</span>` +
-          `<span style="text-align:right">Token</span>` +
-          `<span style="text-align:right">命中率</span></div>`
+          `<span style="text-align:center">环比</span>` +
+          `<span style="text-align:center">Token</span>` +
+          `<span style="text-align:center">命中率</span></div>`
         )
         // 每个星期几,列出 4 周的 花费/Token/命中率
         // 每行用「具体日期 MM-DD」+「相对周次」取代原本的范围标签,
@@ -310,11 +310,11 @@ function buildOption(m: ChartModel): EChartsOption {
               `<span style="text-align:right;color:#334155;font-weight:600;font-variant-numeric:tabular-nums">${dateLabel}</span>` +
               // 相对周次:浅灰小号,左对齐
               `<span style="color:#94a3b8;font-size:10px">${weekCtx}</span>` +
-              // 花费:居中(同上,容差不同位数的 cost 值视觉对称)
+              // 4 个数值列统一居中
               `<span style="text-align:center;color:#334155;font-weight:600;font-variant-numeric:tabular-nums">${costStr}</span>` +
-              `<span style="text-align:right;font-variant-numeric:tabular-nums">${deltaStr}</span>` +
-              `<span style="text-align:right;color:#334155;font-variant-numeric:tabular-nums">${tokStr}</span>` +
-              `<span style="text-align:right;color:#10b981;font-variant-numeric:tabular-nums">${rateStr}</span></div>`
+              `<span style="text-align:center;font-variant-numeric:tabular-nums">${deltaStr}</span>` +
+              `<span style="text-align:center;color:#334155;font-variant-numeric:tabular-nums">${tokStr}</span>` +
+              `<span style="text-align:center;color:#10b981;font-variant-numeric:tabular-nums">${rateStr}</span></div>`
             )
           })
           .join('')
