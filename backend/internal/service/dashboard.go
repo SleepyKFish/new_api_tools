@@ -9,6 +9,7 @@ import (
 
 	"github.com/new-api-tools/backend/internal/cache"
 	"github.com/new-api-tools/backend/internal/database"
+	"github.com/new-api-tools/backend/internal/logger"
 )
 
 // DashboardService handles dashboard analytics queries
@@ -284,35 +285,46 @@ func (s *DashboardService) GetDailyTrends(days int, noCache bool, compareMode st
 // queryDailyTrends fetches rows from the best available source (quota_data or logs)
 // for a time window starting at startUnix and spanning 'days' calendar days.
 func (s *DashboardService) queryDailyTrends(startUnix int64, days int, tzOffset int) ([]map[string]interface{}, error) {
-	// Completed days come from the model-monitor history store. Today remains a
-	// live query because it is intentionally not persisted until tomorrow.
-	completedDays := days - 1
-	if completedDays > 0 {
-		if histSvc, histErr := GetModelHistoryService(); histErr == nil {
-			if historyRows, err := histSvc.QueryDailyAggregatedTrends(days, int64(tzOffset)); err == nil && len(historyRows) == completedDays {
-				today := time.Now().In(time.Local)
-				todayStart := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, time.Local).Unix()
-				liveRows, liveErr := s.queryDailyTrendsRaw(todayStart, tzOffset)
-				if liveErr != nil {
-					return nil, liveErr
-				}
-				return append(historyRows, liveRows...), nil
-			}
-		}
+	if !IsQuotaDataAvailable() {
+		return s.queryDailyTrendsFromLogs(startUnix, tzOffset)
 	}
 
-	// A sparse/new history store cannot represent the requested range safely.
-	return s.queryDailyTrendsRaw(startUnix, tzOffset)
+	// Cost/request/user metrics always come from quota_data. Token/cache metrics
+	// are overlaid from completed model-history snapshots plus today's live logs.
+	rows, err := s.queryDailyTrendsFromQuotaData(startUnix, tzOffset)
+	if err != nil {
+		return nil, err
+	}
+	if histSvc, histErr := GetModelHistoryService(); histErr == nil {
+		if historyRows, historyErr := histSvc.QueryDailyAggregatedTrends(days, int64(tzOffset)); historyErr == nil {
+			rows = mergeDailyTokenMetrics(rows, historyRows)
+		} else {
+			logger.L.Warn("[Dashboard] 读取模型历史Token失败: " + historyErr.Error())
+		}
+	} else {
+		logger.L.Warn("[Dashboard] 初始化模型历史库失败: " + histErr.Error())
+	}
+
+	today := time.Now().In(time.Local)
+	todayStart := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, time.Local).Unix()
+	liveRows, liveErr := s.queryDailyTokenTrendsFromLogs(todayStart, today.Unix()+1, tzOffset)
+	if liveErr != nil {
+		logger.L.Warn("[Dashboard] 读取今日实时Token失败: " + liveErr.Error())
+		return rows, nil
+	}
+	return mergeDailyTokenMetrics(rows, liveRows), nil
 }
 
 func (s *DashboardService) queryDailyTrendsRaw(startUnix int64, tzOffset int) ([]map[string]interface{}, error) {
-	dayGroupExpr := fmt.Sprintf("FLOOR((created_at + %d) / 86400)", tzOffset)
-
-	var rows []map[string]interface{}
-	var err error
-
 	if IsQuotaDataAvailable() {
-		query := s.db.RebindQuery(fmt.Sprintf(`
+		return s.queryDailyTrendsFromQuotaData(startUnix, tzOffset)
+	}
+	return s.queryDailyTrendsFromLogs(startUnix, tzOffset)
+}
+
+func (s *DashboardService) queryDailyTrendsFromQuotaData(startUnix int64, tzOffset int) ([]map[string]interface{}, error) {
+	dayGroupExpr := fmt.Sprintf("FLOOR((created_at + %d) / 86400)", tzOffset)
+	query := s.db.RebindQuery(fmt.Sprintf(`
 			SELECT %s as day_group,
 				COALESCE(SUM(count), 0) as request_count,
 				COALESCE(SUM(quota), 0) as quota_used,
@@ -325,31 +337,105 @@ func (s *DashboardService) queryDailyTrendsRaw(startUnix int64, tzOffset int) ([
 			WHERE created_at >= ?
 			GROUP BY %s
 			ORDER BY day_group ASC`,
-			dayGroupExpr, dayGroupExpr))
-		rows, err = s.db.QueryWithTimeout(30*time.Second, query, startUnix)
-	} else {
-		query := s.db.RebindQuery(fmt.Sprintf(`
+		dayGroupExpr, dayGroupExpr))
+	return s.db.QueryWithTimeout(30*time.Second, query, startUnix)
+}
+
+func (s *DashboardService) queryDailyTrendsFromLogs(startUnix int64, tzOffset int) ([]map[string]interface{}, error) {
+	dayGroupExpr := fmt.Sprintf("FLOOR((created_at + %d) / 86400)", tzOffset)
+	modelMetrics := &ModelStatusService{db: s.db}
+	inputTokensExpr := "prompt_tokens"
+	cacheReadExpr := "0"
+	cacheWriteExpr := "0"
+	if s.db.ColumnExists("logs", "other") {
+		inputTokensExpr = modelMetrics.normalizedInputTokensExpr("prompt_tokens", "other")
+		cacheReadExpr = modelMetrics.jsonNumberExpr("other", "cache_tokens")
+		cacheWriteExpr = modelMetrics.cacheWriteTokensExpr("other")
+	}
+	query := s.db.RebindQuery(fmt.Sprintf(`
 			SELECT %s as day_group,
 				COUNT(*) as request_count,
 				COALESCE(SUM(quota), 0) as quota_used,
 				COUNT(DISTINCT user_id) as unique_users,
-				COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
+				COALESCE(SUM(%s), 0) as prompt_tokens,
 				COALESCE(SUM(completion_tokens), 0) as completion_tokens,
-				COALESCE(SUM(CASE WHEN other IS NOT NULL AND other <> '' AND JSON_VALID(other)
-					THEN CAST(JSON_UNQUOTE(JSON_EXTRACT(other, '$.cache_tokens')) AS UNSIGNED)
-					ELSE 0 END), 0) as cache_hit_tokens,
-				COALESCE(SUM(CASE WHEN other IS NOT NULL AND other <> '' AND JSON_VALID(other)
-					THEN CAST(JSON_UNQUOTE(JSON_EXTRACT(other, '$.cache_write_tokens')) AS UNSIGNED)
-					ELSE 0 END), 0) as cache_write_tokens
+				COALESCE(SUM(%s), 0) as cache_hit_tokens,
+				COALESCE(SUM(%s), 0) as cache_write_tokens
 			FROM logs
 			WHERE created_at >= ? AND type = 2
 			GROUP BY %s
 			ORDER BY day_group ASC`,
-			dayGroupExpr, dayGroupExpr))
-		rows, err = s.db.QueryWithTimeout(30*time.Second, query, startUnix)
+		dayGroupExpr, inputTokensExpr, cacheReadExpr, cacheWriteExpr, dayGroupExpr))
+	return s.db.QueryWithTimeout(30*time.Second, query, startUnix)
+}
+
+func (s *DashboardService) queryDailyTokenTrendsFromLogs(startUnix, endUnix int64, tzOffset int) ([]map[string]interface{}, error) {
+	dayGroupExpr := fmt.Sprintf("FLOOR((created_at + %d) / 86400)", tzOffset)
+	modelMetrics := &ModelStatusService{db: s.db}
+	inputTokensExpr := "prompt_tokens"
+	cacheReadExpr := "0"
+	cacheWriteExpr := "0"
+	if s.db.ColumnExists("logs", "other") {
+		inputTokensExpr = modelMetrics.normalizedInputTokensExpr("prompt_tokens", "other")
+		cacheReadExpr = modelMetrics.jsonNumberExpr("other", "cache_tokens")
+		cacheWriteExpr = modelMetrics.cacheWriteTokensExpr("other")
+	}
+	query := s.db.RebindQuery(fmt.Sprintf(`
+		SELECT %s as day_group,
+			COALESCE(SUM(%s), 0) as prompt_tokens,
+			COALESCE(SUM(completion_tokens), 0) as completion_tokens,
+			COALESCE(SUM(%s), 0) as cache_hit_tokens,
+			COALESCE(SUM(%s), 0) as cache_write_tokens
+		FROM logs
+		WHERE created_at >= ? AND created_at < ? AND type = 2
+		GROUP BY %s
+		ORDER BY day_group ASC`,
+		dayGroupExpr, inputTokensExpr, cacheReadExpr, cacheWriteExpr, dayGroupExpr))
+	return s.db.QueryWithTimeout(15*time.Second, query, startUnix, endUnix)
+}
+
+var dailyTokenMetricKeys = []string{
+	"prompt_tokens",
+	"completion_tokens",
+	"cache_hit_tokens",
+	"cache_write_tokens",
+}
+
+func mergeDailyTokenMetrics(baseRows, tokenRows []map[string]interface{}) []map[string]interface{} {
+	byGroup := make(map[int64]map[string]interface{}, len(baseRows)+len(tokenRows))
+	for _, row := range baseRows {
+		if group := toInt64(row["day_group"]); group > 0 {
+			byGroup[group] = row
+		}
 	}
 
-	return rows, err
+	for _, tokens := range tokenRows {
+		group := toInt64(tokens["day_group"])
+		if group <= 0 {
+			continue
+		}
+		row := byGroup[group]
+		if row == nil {
+			row = map[string]interface{}{
+				"day_group":     group,
+				"request_count": int64(0),
+				"quota_used":    int64(0),
+				"unique_users":  int64(0),
+			}
+			byGroup[group] = row
+			baseRows = append(baseRows, row)
+		}
+		for _, key := range dailyTokenMetricKeys {
+			if value, ok := tokens[key]; ok {
+				row[key] = value
+			}
+		}
+	}
+
+	sort.Slice(baseRows, func(i, j int) bool {
+		return toInt64(baseRows[i]["day_group"]) < toInt64(baseRows[j]["day_group"])
+	})
+	return baseRows
 }
 
 // queryDailyTrendsRange is like queryDailyTrends but constrains the window to

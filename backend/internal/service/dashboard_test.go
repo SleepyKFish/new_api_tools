@@ -82,3 +82,59 @@ func TestFillHourlyGapsAtUsesRequestedHour(t *testing.T) {
 		t.Fatalf("request_count = %d, want 12", got)
 	}
 }
+
+func TestMergeDailyTokenMetricsPreservesQuotaDataMetrics(t *testing.T) {
+	base := []map[string]interface{}{
+		{
+			"day_group":         int64(100),
+			"request_count":     int64(7),
+			"quota_used":        int64(500),
+			"unique_users":      int64(3),
+			"prompt_tokens":     int64(0),
+			"completion_tokens": int64(0),
+		},
+		{
+			"day_group":         int64(101),
+			"request_count":     int64(4),
+			"quota_used":        int64(250),
+			"unique_users":      int64(2),
+			"prompt_tokens":     int64(0),
+			"completion_tokens": int64(0),
+		},
+	}
+	tokens := []map[string]interface{}{
+		{
+			"day_group":          int64(100),
+			"quota_used":         int64(999),
+			"prompt_tokens":      int64(120),
+			"completion_tokens":  int64(40),
+			"cache_hit_tokens":   int64(20),
+			"cache_write_tokens": int64(10),
+		},
+		{
+			"day_group":         int64(99),
+			"prompt_tokens":     int64(50),
+			"completion_tokens": int64(15),
+		},
+	}
+
+	got := mergeDailyTokenMetrics(base, tokens)
+	if len(got) != 3 || toInt64(got[0]["day_group"]) != 99 ||
+		toInt64(got[1]["day_group"]) != 100 || toInt64(got[2]["day_group"]) != 101 {
+		t.Fatalf("merged rows not sorted or complete: %v", got)
+	}
+	merged := got[1]
+	if toInt64(merged["quota_used"]) != 500 || toInt64(merged["request_count"]) != 7 || toInt64(merged["unique_users"]) != 3 {
+		t.Fatalf("quota_data metrics were overwritten: %v", merged)
+	}
+	if toInt64(merged["prompt_tokens"]) != 120 || toInt64(merged["completion_tokens"]) != 40 ||
+		toInt64(merged["cache_hit_tokens"]) != 20 || toInt64(merged["cache_write_tokens"]) != 10 {
+		t.Fatalf("token metrics were not overlaid: %v", merged)
+	}
+	if toInt64(got[0]["quota_used"]) != 0 || toInt64(got[0]["prompt_tokens"]) != 50 {
+		t.Fatalf("history-only day should retain zero cost and token metrics: %v", got[0])
+	}
+	if toInt64(got[2]["quota_used"]) != 250 || toInt64(got[2]["prompt_tokens"]) != 0 {
+		t.Fatalf("quota-only day should retain cost and unavailable token metrics: %v", got[2])
+	}
+}
