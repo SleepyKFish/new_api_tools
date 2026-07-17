@@ -11,6 +11,8 @@ import { MOCK_MODE } from '../lib/env'
 import { mockDashboardData } from './mockData'
 
 type RefreshInterval = 0 | 30 | 60 | 120 | 300 // 秒，0表示关闭
+const SPEND_TRENDS_CACHE_KEY = `dashboard_spend_hourly_v1:${MOCK_MODE ? 'mock' : 'live'}`
+const HOURLY_REFRESH_DELAY_MS = 5_000
 
 interface SystemOverview {
   total_users: number
@@ -36,6 +38,7 @@ interface UsageStatistics {
 interface DailyTrend {
   date?: string
   hour?: string
+  timestamp?: number
   request_count: number
   quota_used: number
   unique_users?: number
@@ -77,12 +80,74 @@ interface RefreshEstimate {
 
 type PeriodType = 'today' | 'week' | 'month'
 
+function localDayKey(date = new Date()): string {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+function localHourKey(date: Date): string {
+  return `${localDayKey(date)} ${String(date.getHours()).padStart(2, '0')}:00`
+}
+
+function trendDayKey(trend: DailyTrend): string {
+  if (trend.hour) return trend.hour.slice(0, 10)
+  if (trend.timestamp) return localDayKey(new Date(trend.timestamp * 1000))
+  return ''
+}
+
+function trendHourKey(trend: DailyTrend): string {
+  if (trend.hour) return trend.hour
+  if (trend.timestamp) return localHourKey(new Date(trend.timestamp * 1000))
+  return ''
+}
+
+function readCachedDailyTrends(): DailyTrend[] {
+  try {
+    const raw = localStorage.getItem(SPEND_TRENDS_CACHE_KEY)
+    if (!raw) return []
+    const cached = JSON.parse(raw) as { day?: string; trends?: DailyTrend[] }
+    if (cached.day !== localDayKey() || !Array.isArray(cached.trends)) return []
+    return cached.trends.filter((trend) => trend && trendDayKey(trend) === cached.day)
+  } catch {
+    return []
+  }
+}
+
+function mergeDailyTrends(current: DailyTrend[], incoming: DailyTrend[]): DailyTrend[] {
+  const today = localDayKey()
+  const byHour = new Map<string, DailyTrend>()
+
+  for (const trend of [...current, ...incoming]) {
+    const key = trendHourKey(trend)
+    if (key && trendDayKey(trend) === today) byHour.set(key, trend)
+  }
+
+  return [...byHour.values()].sort((a, b) => trendHourKey(a).localeCompare(trendHourKey(b)))
+}
+
+function cacheDailyTrends(trends: DailyTrend[]): void {
+  try {
+    localStorage.setItem(SPEND_TRENDS_CACHE_KEY, JSON.stringify({ day: localDayKey(), trends }))
+  } catch {
+    // The in-memory chart still works if storage is unavailable or full.
+  }
+}
+
+function msUntilNextHourlyRefresh(now = new Date()): number {
+  const next = new Date(now)
+  next.setHours(next.getHours() + 1, 0, 0, HOURLY_REFRESH_DELAY_MS)
+  return Math.max(1_000, next.getTime() - now.getTime())
+}
+
 export function Dashboard() {
   const { token } = useAuth()
   const { showToast } = useToast()
   const [overview, setOverview] = useState<SystemOverview | null>(null)
   const [usage, setUsage] = useState<UsageStatistics | null>(null)
-  const [dailyTrends, setDailyTrends] = useState<DailyTrend[]>([])
+  const [dailyTrends, setDailyTrends] = useState<DailyTrend[]>(readCachedDailyTrends)
+  const [trendsLoading, setTrendsLoading] = useState(true)
   const [analyticsSummary, setAnalyticsSummary] = useState<AnalyticsSummary | null>(null)
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
@@ -135,12 +200,6 @@ export function Dashboard() {
     return true
   }, [])
 
-  const mockTrends = useCallback(async (_noCache: boolean, _signal?: AbortSignal) => {
-    await delay(200)
-    setDailyTrends(mockDashboardData.getToday())
-    return true
-  }, [])
-
   const mockAnalyticsSummary = useCallback(async () => {
     await delay(100)
     const sortedByRequest = [...mockDashboardData.topUsers].sort((a, b) => b.request_count - a.request_count)
@@ -190,22 +249,39 @@ export function Dashboard() {
     return false
   }, [apiUrl, getAuthHeaders, period])
 
-  // 当天按小时趋势(用于「花费分析」双面板图:每小时花费折线 + token 组成堆叠柱)
-  const fetchTrends = useCallback(async (noCache = false, signal?: AbortSignal): Promise<boolean> => {
+  const mergePreviousHourlyTrend = useCallback((trends: DailyTrend[]) => {
+    setDailyTrends(current => {
+      const merged = mergeDailyTrends(current, trends)
+      cacheDailyTrends(merged)
+      return merged
+    })
+  }, [])
+
+  // 花费分析独立按整点增量更新，每次只查询上一个完整小时。
+  const fetchPreviousHourlyTrend = useCallback(async (signal?: AbortSignal): Promise<boolean> => {
     try {
-      const cacheParam = noCache ? '&no_cache=true' : ''
+      if (MOCK_MODE) {
+        await delay(200)
+        const previousHour = new Date(Date.now() - 60 * 60 * 1000)
+        const trend = mockDashboardData.getToday().filter(item => item.hour === localHourKey(previousHour))
+        mergePreviousHourlyTrend(trend)
+        return true
+      }
+
       const response = await fetch(
-        `${apiUrl}/api/dashboard/trends/hourly?hours=24${cacheParam}`,
+        `${apiUrl}/api/dashboard/trends/hourly/previous`,
         { headers: getAuthHeaders(), signal },
       )
       const data = await response.json()
-      if (data.success) {
-        setDailyTrends(data.data)
+      if (data.success && Array.isArray(data.data)) {
+        mergePreviousHourlyTrend(data.data)
+        return true
       }
-      return true
-    } catch (error) { console.error('Failed to fetch trends:', error) }
+    } catch (error) {
+      if (!signal?.aborted) console.error('Failed to fetch previous hourly trend:', error)
+    }
     return false
-  }, [apiUrl, getAuthHeaders])
+  }, [apiUrl, getAuthHeaders, mergePreviousHourlyTrend])
 
   const fetchAnalyticsSummary = useCallback(async (noCache = false, signal?: AbortSignal): Promise<boolean> => {
     try {
@@ -243,34 +319,63 @@ export function Dashboard() {
   const fetchAll = useCallback(async (noCache = false, signal?: AbortSignal): Promise<boolean> => {
     if (MOCK_MODE) {
       const results = await Promise.all([
-        mockOverview(), mockUsage(), mockTrends(noCache, signal), mockAnalyticsSummary(),
+        mockOverview(), mockUsage(), mockAnalyticsSummary(),
       ])
       return results.every(Boolean)
     }
     const results = await Promise.all([
       fetchOverview(noCache, signal),
       fetchUsage(noCache, signal),
-      fetchTrends(noCache, signal),
       fetchAnalyticsSummary(noCache, signal),
     ])
     return results.every(Boolean)
-  }, [fetchOverview, fetchUsage, fetchTrends, fetchAnalyticsSummary, mockOverview, mockUsage, mockTrends, mockAnalyticsSummary])
+  }, [fetchOverview, fetchUsage, fetchAnalyticsSummary, mockOverview, mockUsage, mockAnalyticsSummary])
 
   const refreshAll = useCallback(async (signal?: AbortSignal): Promise<boolean> => {
     if (MOCK_MODE) {
       const results = await Promise.all([
-        mockOverview(), mockUsage(), mockTrends(true, signal), mockAnalyticsSummary(),
+        mockOverview(), mockUsage(), mockAnalyticsSummary(),
       ])
       return results.every(Boolean)
     }
     const results = await Promise.all([
       fetchOverview(true, signal),
       fetchUsage(true, signal),
-      fetchTrends(true, signal),
       fetchAnalyticsSummary(true, signal),
     ])
     return results.every(Boolean)
-  }, [fetchOverview, fetchUsage, fetchTrends, fetchAnalyticsSummary, mockOverview, mockUsage, mockTrends, mockAnalyticsSummary])
+  }, [fetchOverview, fetchUsage, fetchAnalyticsSummary, mockOverview, mockUsage, mockAnalyticsSummary])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    let timerId: number | undefined
+    let active = true
+
+    const scheduleNext = () => {
+      timerId = window.setTimeout(async () => {
+        await fetchPreviousHourlyTrend(controller.signal)
+        if (active) scheduleNext()
+      }, msUntilNextHourlyRefresh())
+    }
+
+    const loadPreviousHour = async () => {
+      try {
+        await fetchPreviousHourlyTrend(controller.signal)
+      } finally {
+        if (active) {
+          setTrendsLoading(false)
+          scheduleNext()
+        }
+      }
+    }
+
+    loadPreviousHour()
+    return () => {
+      active = false
+      controller.abort()
+      if (timerId !== undefined) window.clearTimeout(timerId)
+    }
+  }, [fetchPreviousHourlyTrend])
 
   // 获取系统规模信息（仅首次加载）
   const fetchSystemInfo = useCallback(async () => {
@@ -748,7 +853,7 @@ export function Dashboard() {
       {/* Spend Analytics — 当天按小时:上「每小时花费折线」+ 下「Token 组成堆叠柱」,共用小时横轴 */}
       <SpendAnalytics
         dailyTrends={dailyTrends}
-        loading={loading}
+        loading={trendsLoading}
       />
 
       {/* Analytics Kings */}

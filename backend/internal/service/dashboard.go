@@ -459,6 +459,36 @@ func (s *DashboardService) GetHourlyTrends(hours int, noCache bool, compareMode 
 	return result, nil
 }
 
+// GetPreviousHourlyTrend returns the last fully completed local-time hour.
+func (s *DashboardService) GetPreviousHourlyTrend(noCache bool) ([]map[string]interface{}, error) {
+	start, end := previousCompleteHourRange(time.Now())
+	_, tzOffset := start.Zone()
+	hourGroup := (start.Unix() + int64(tzOffset)) / 3600
+	cacheKey := fmt.Sprintf("dashboard:hourly:completed:%d", hourGroup)
+	cm := cache.Get()
+
+	if !noCache {
+		var cached []map[string]interface{}
+		if found, _ := cm.GetJSON(cacheKey, &cached); found {
+			return cached, nil
+		}
+	}
+
+	rows, err := s.queryHourlyTrendRange(start.Unix(), end.Unix(), tzOffset)
+	if err != nil {
+		return nil, err
+	}
+
+	result := fillHourlyGapsAt(rows, 1, tzOffset, start)
+	cm.Set(cacheKey, result, 25*time.Hour)
+	return result, nil
+}
+
+func previousCompleteHourRange(now time.Time) (time.Time, time.Time) {
+	end := time.Date(now.Year(), now.Month(), now.Day(), now.Hour(), 0, 0, 0, now.Location())
+	return end.Add(-time.Hour), end
+}
+
 // queryHourlyTrends fetches hourly rows from logs table.
 func (s *DashboardService) queryHourlyTrends(startUnix int64, hours int, tzOffset int) ([]map[string]interface{}, error) {
 	hourGroupExpr := fmt.Sprintf("FLOOR((created_at + %d) / 3600)", tzOffset)
@@ -482,6 +512,31 @@ func (s *DashboardService) queryHourlyTrends(startUnix int64, hours int, tzOffse
 		hourGroupExpr, hourGroupExpr))
 
 	return s.db.QueryWithTimeout(15*time.Second, query, startUnix)
+}
+
+// queryHourlyTrendRange aggregates token and spend metrics inside one bounded interval.
+func (s *DashboardService) queryHourlyTrendRange(startUnix, endUnix int64, tzOffset int) ([]map[string]interface{}, error) {
+	hourGroupExpr := fmt.Sprintf("FLOOR((created_at + %d) / 3600)", tzOffset)
+
+	query := s.db.RebindQuery(fmt.Sprintf(`
+		SELECT %s as hour_group,
+			COUNT(*) as request_count,
+			COALESCE(SUM(quota), 0) as quota_used,
+			COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
+			COALESCE(SUM(completion_tokens), 0) as completion_tokens,
+			COALESCE(SUM(CASE WHEN other IS NOT NULL AND other <> '' AND JSON_VALID(other)
+				THEN CAST(JSON_UNQUOTE(JSON_EXTRACT(other, '$.cache_tokens')) AS UNSIGNED)
+				ELSE 0 END), 0) as cache_hit_tokens,
+			COALESCE(SUM(CASE WHEN other IS NOT NULL AND other <> '' AND JSON_VALID(other)
+				THEN CAST(JSON_UNQUOTE(JSON_EXTRACT(other, '$.cache_write_tokens')) AS UNSIGNED)
+				ELSE 0 END), 0) as cache_write_tokens
+		FROM logs
+		WHERE created_at >= ? AND created_at < ? AND type = 2
+		GROUP BY %s
+		ORDER BY hour_group ASC`,
+		hourGroupExpr, hourGroupExpr))
+
+	return s.db.QueryWithTimeout(15*time.Second, query, startUnix, endUnix)
 }
 
 // queryHourlyTrendsRange is like queryHourlyTrends but constrains to [startUnix, endUnix).
@@ -857,8 +912,11 @@ func fillDailyGaps(rows []map[string]interface{}, days int, tzOffset int) []map[
 // Matches DB rows by hour_group (FLOOR((unix_ts + tzOffset) / 3600)) for
 // timezone-safe bucket matching that is identical to the SQL grouping expression.
 func fillHourlyGaps(rows []map[string]interface{}, hours int, tzOffset int) []map[string]interface{} {
-	now := time.Now()
-	loc := now.Location()
+	return fillHourlyGapsAt(rows, hours, tzOffset, time.Now())
+}
+
+func fillHourlyGapsAt(rows []map[string]interface{}, hours int, tzOffset int, anchor time.Time) []map[string]interface{} {
+	loc := anchor.Location()
 
 	// Build lookup keyed by hour_group integer
 	lookup := make(map[int64]map[string]interface{}, len(rows))
@@ -871,7 +929,7 @@ func fillHourlyGaps(rows []map[string]interface{}, hours int, tzOffset int) []ma
 
 	result := make([]map[string]interface{}, 0, hours)
 	for i := hours - 1; i >= 0; i-- {
-		t := now.Add(-time.Duration(i) * time.Hour)
+		t := anchor.Add(-time.Duration(i) * time.Hour)
 		hourStart := time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), 0, 0, 0, loc)
 		// Compute the same hour_group as the SQL expression
 		expectedGroup := (hourStart.Unix() + int64(tzOffset)) / 3600

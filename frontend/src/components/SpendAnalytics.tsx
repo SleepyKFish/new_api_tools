@@ -38,6 +38,9 @@ const COLOR_COST = '#0ea5e9' // sky —— 花费折线
 const COLOR_HIT = '#22c55e' // green —— 缓存命中
 const COLOR_MISS = '#6366f1' // indigo —— 缓存未命中
 const COLOR_OUT = '#f59e0b' // amber —— 输出
+const MIN_OUTPUT_BAR_HEIGHT = 14
+const TOKEN_AXIS_HEADROOM = 1.1
+const TOKEN_BAR_MAX_WIDTH = 56
 
 /** 取柱子/折线点的小时标签(HH:00)。 */
 function hourLabel(d: DailyTrend): string {
@@ -238,6 +241,7 @@ function buildOption(m: ChartModel): EChartsOption {
         nameGap: 52,
         nameTextStyle: { color: labelColor, fontSize: 10 },
         axisLabel: { color: labelColor, fontSize: 10, formatter: (v: number) => formatTokens(v) },
+        max: ({ max }: { max: number }) => (max > 0 ? max * TOKEN_AXIS_HEADROOM : 1),
         splitLine,
       },
     ],
@@ -279,19 +283,24 @@ function buildOption(m: ChartModel): EChartsOption {
       },
       {
         name: '缓存命中', type: 'bar', stack: 'tok', xAxisIndex: 1, yAxisIndex: 1, data: m.hit,
+        barMaxWidth: TOKEN_BAR_MAX_WIDTH,
         itemStyle: { color: COLOR_HIT },
         label: { show: true, position: 'inside', color: '#fff', fontSize: 9, formatter: (p: any) => (Number(p.value) > 0 ? formatTokens(Number(p.value)) : '') },
         labelLayout: { hideOverlap: true },
       },
       {
         name: '缓存未命中', type: 'bar', stack: 'tok', xAxisIndex: 1, yAxisIndex: 1, data: m.miss,
+        barMaxWidth: TOKEN_BAR_MAX_WIDTH,
         itemStyle: { color: COLOR_MISS },
         label: { show: true, position: 'inside', color: '#fff', fontSize: 9, formatter: (p: any) => (Number(p.value) > 0 ? formatTokens(Number(p.value)) : '') },
         labelLayout: { hideOverlap: true },
       },
       {
-        name: '输出', type: 'bar', stack: 'tok', xAxisIndex: 1, yAxisIndex: 1, data: m.out,
-        itemStyle: { color: COLOR_OUT },
+        name: '输出', type: 'bar', stack: 'tok', xAxisIndex: 1, yAxisIndex: 1,
+        data: m.out.map((value) => (value > 0 ? value : null)),
+        barMaxWidth: TOKEN_BAR_MAX_WIDTH,
+        barMinHeight: MIN_OUTPUT_BAR_HEIGHT,
+        itemStyle: { color: COLOR_OUT, borderRadius: [3, 3, 0, 0] },
         label: { show: true, position: 'inside', color: '#fff', fontSize: 9, formatter: (p: any) => (Number(p.value) > 0 ? formatTokens(Number(p.value)) : '') },
         labelLayout: { hideOverlap: true },
       },
