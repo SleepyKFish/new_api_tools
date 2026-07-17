@@ -3819,8 +3819,14 @@ function StatusSlotBar({
             <div className="flex justify-between gap-4">
               <span>失败率:</span>
               <span className="font-medium">
+                {/*
+                  注意:non_format_failure_count 已经 = failure_count - format_error_count,
+                  其中包含 rate_limit_count(限速是 failure 的子集,不是平行类别)。
+                  因此红色部分只用 non_format_failure_count,不要再 + rate_limit_count,
+                  否则会双重计算(详见 README 注释)。
+                */}
                 <span className="text-red-600">{ratePercent(
-                  (hoveredSlot.non_format_failure_count ?? hoveredSlot.model_failure_count ?? Math.max(0, hoveredSlot.failure_count - (hoveredSlot.format_error_count ?? 0))) + (hoveredSlot.rate_limit_count ?? 0),
+                  hoveredSlot.non_format_failure_count ?? hoveredSlot.model_failure_count ?? Math.max(0, hoveredSlot.failure_count - (hoveredSlot.format_error_count ?? 0)),
                   hoveredSlot.total_requests
                 )}%</span>
                 <span className="text-muted-foreground/30 mx-0.5">/</span>
