@@ -1129,7 +1129,7 @@ func (s *ModelHistoryService) GetChannelModelPerformanceByDate(date string, chan
 			"total":        0,
 			"limit":        limit,
 			"offset":       offset,
-			"has_more":    false,
+			"has_more":     false,
 			"data":         []map[string]interface{}{},
 		}, nil
 	}
@@ -1194,7 +1194,7 @@ func (s *ModelHistoryService) GetChannelModelPerformanceByDate(date string, chan
 		"total":        total,
 		"limit":        limit,
 		"offset":       offset,
-		"has_more":    offset+len(data) < total,
+		"has_more":     offset+len(data) < total,
 		"data":         data,
 	}, nil
 }
@@ -1311,8 +1311,8 @@ func (s *ModelHistoryService) GetChannelCostTrends(days int, compareMode string)
 	}
 
 	return map[string]interface{}{
-		"channels":      channels,
-		"compare_mode":  modeLabel,
+		"channels":       channels,
+		"compare_mode":   modeLabel,
 		"compare_offset": offsetDays,
 	}, nil
 }
@@ -1414,37 +1414,31 @@ func (s *ModelHistoryService) buildChannelCostTrends(
 	return channels
 }
 
-// QueryDailyAggregatedTrends returns daily trends (aggregated across all models)
-// from model_daily_summary, matching the same output format as dashboard's
-// queryDailyTrends (day_group key for fillDailyGaps compatibility).
+// QueryDailyAggregatedTrends returns daily Token/cache trends aggregated across
+// all channels, using the day_group format expected by fillDailyGaps.
 //
 // This avoids scanning the main logs/quota_data tables for the 28-day weekly
 // pattern view, which is a heavy real-time aggregation. The model_history.db
-// already pre-aggregates per-model-per-day data daily at 01:00 local time.
+// already pre-aggregates per-channel-per-day data daily at 01:00 local time.
 //
-// Only completed days are returned; callers merge today's live aggregate and
-// fall back to source logs unless every requested completed day is present.
+// Only completed days are returned; callers merge today's live aggregate.
 func (s *ModelHistoryService) QueryDailyAggregatedTrends(days int, tzOffset int64) ([]map[string]interface{}, error) {
 	cutoff := time.Now().AddDate(0, 0, -days+1).Format("2006-01-02")
 	today := time.Now().Format("2006-01-02")
 
-	query := `SELECT totals.date,
-			COALESCE(SUM(summary.total_requests - summary.failure_count), 0) as request_count,
-			COALESCE(SUM(summary.quota_sum), 0) as quota_used,
-			totals.unique_users,
-			COALESCE(SUM(summary.input_tokens_sum), 0) as prompt_tokens,
-			COALESCE(SUM(summary.completion_tokens_sum), 0) as completion_tokens,
-			COALESCE(SUM(summary.cache_tokens_sum), 0) as cache_hit_tokens,
-			COALESCE(SUM(summary.cache_write_tokens_sum), 0) as cache_write_tokens
-		FROM model_daily_totals totals
-		LEFT JOIN model_daily_summary summary ON summary.date = totals.date
-		WHERE totals.date >= ? AND totals.date < ?
-		GROUP BY totals.date, totals.unique_users
-		ORDER BY totals.date ASC`
+	query := `SELECT date,
+			COALESCE(SUM(input_tokens_sum), 0) as prompt_tokens,
+			COALESCE(SUM(completion_tokens_sum), 0) as completion_tokens,
+			COALESCE(SUM(cache_tokens_sum), 0) as cache_hit_tokens,
+			COALESCE(SUM(cache_write_tokens_sum), 0) as cache_write_tokens
+		FROM model_daily_channel
+		WHERE date >= ? AND date < ?
+		GROUP BY date
+		ORDER BY date ASC`
 
 	rows, err := s.db.Query(query, cutoff, today)
 	if err != nil {
-		return nil, fmt.Errorf("query model_daily_summary trends: %w", err)
+		return nil, fmt.Errorf("query model_daily_channel trends: %w", err)
 	}
 	defer rows.Close()
 
@@ -1453,11 +1447,9 @@ func (s *ModelHistoryService) QueryDailyAggregatedTrends(days int, tzOffset int6
 
 	for rows.Next() {
 		var dateStr string
-		var requestCount, quotaUsed, promptTokens, completionTokens, cacheHitTokens, cacheWriteTokens float64
-		var uniqueUsers int64
-		if err := rows.Scan(&dateStr, &requestCount, &quotaUsed, &uniqueUsers, &promptTokens,
-			&completionTokens, &cacheHitTokens, &cacheWriteTokens); err != nil {
-			return nil, fmt.Errorf("scan model_daily_summary row: %w", err)
+		var promptTokens, completionTokens, cacheHitTokens, cacheWriteTokens float64
+		if err := rows.Scan(&dateStr, &promptTokens, &completionTokens, &cacheHitTokens, &cacheWriteTokens); err != nil {
+			return nil, fmt.Errorf("scan model_daily_channel row: %w", err)
 		}
 
 		// Compute day_group compatible with fillDailyGaps:
@@ -1471,9 +1463,6 @@ func (s *ModelHistoryService) QueryDailyAggregatedTrends(days int, tzOffset int6
 
 		result = append(result, map[string]interface{}{
 			"day_group":          dayGroup,
-			"request_count":      int64(requestCount),
-			"quota_used":         quotaUsed,
-			"unique_users":       uniqueUsers,
 			"prompt_tokens":      int64(promptTokens),
 			"completion_tokens":  int64(completionTokens),
 			"cache_hit_tokens":   int64(cacheHitTokens),
@@ -1482,7 +1471,7 @@ func (s *ModelHistoryService) QueryDailyAggregatedTrends(days int, tzOffset int6
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate model_daily_summary rows: %w", err)
+		return nil, fmt.Errorf("iterate model_daily_channel rows: %w", err)
 	}
 	return result, nil
 }

@@ -402,6 +402,19 @@ func TestModelHistoryDailyTrendAggregationAndBackfillState(t *testing.T) {
 				cacheWriteTokensSum: 10,
 			},
 		},
+		channels: map[int64]*dailyPerfStats{
+			10: {
+				inputTokensSum:      100,
+				completionTokensSum: 40,
+				cacheTokensSum:      20,
+			},
+			20: {
+				inputTokensSum:      70,
+				completionTokensSum: 30,
+				cacheWriteTokensSum: 10,
+			},
+		},
+		chanName: map[int64]string{10: "channel-a", 20: "channel-b"},
 	}
 	if err := hist.SaveDay(completed); err != nil {
 		t.Fatalf("SaveDay completed failed: %v", err)
@@ -436,24 +449,13 @@ func TestModelHistoryDailyTrendAggregationAndBackfillState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("QueryDailyAggregatedTrends failed: %v", err)
 	}
-	if len(rows) != 2 {
-		t.Fatalf("completed trend rows=%d, want 2 (today must be excluded): %v", len(rows), rows)
+	if len(rows) != 1 {
+		t.Fatalf("completed channel trend rows=%d, want 1 (today must be excluded): %v", len(rows), rows)
 	}
-	var completedRow map[string]interface{}
-	for _, row := range rows {
-		if toInt64(row["request_count"]) == 4 {
-			completedRow = row
-			break
-		}
-	}
-	if completedRow == nil {
-		t.Fatalf("cross-model completed row not found: %v", rows)
-	}
-	if toInt64(completedRow["quota_used"]) != 20 || toInt64(completedRow["prompt_tokens"]) != 170 || toInt64(completedRow["completion_tokens"]) != 70 {
-		t.Fatalf("cross-model trend totals wrong: %v", completedRow)
-	}
-	if toInt64(completedRow["unique_users"]) != 3 {
-		t.Fatalf("unique user total wrong: %v", completedRow)
+	completedRow := rows[0]
+	if toInt64(completedRow["prompt_tokens"]) != 170 || toInt64(completedRow["completion_tokens"]) != 70 ||
+		toInt64(completedRow["cache_hit_tokens"]) != 20 || toInt64(completedRow["cache_write_tokens"]) != 10 {
+		t.Fatalf("cross-channel Token totals wrong: %v", completedRow)
 	}
 
 	if has, err := hist.HasDailyTotals(completedDate); err != nil || !has {
@@ -468,6 +470,10 @@ func TestModelHistoryDailyTrendAggregationAndBackfillState(t *testing.T) {
 	}
 	if has, err := hist.HasDailyTotals(completedDate); err != nil || has {
 		t.Fatalf("legacy summary must be incomplete for catch-up: has=%v err=%v", has, err)
+	}
+	rows, err = hist.QueryDailyAggregatedTrends(7, int64(offset))
+	if err != nil || len(rows) != 1 || toInt64(rows[0]["prompt_tokens"]) != 170 {
+		t.Fatalf("channel Token history must not depend on daily totals: rows=%v err=%v", rows, err)
 	}
 
 	complete, err := hist.IsFullHistoryBackfillComplete()
