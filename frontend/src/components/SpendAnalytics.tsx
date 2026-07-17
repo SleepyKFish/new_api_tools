@@ -3,10 +3,10 @@
  *
  * 一个卡片,上下两个图共用「小时」横坐标(ECharts 双 grid,x 轴 + tooltip 联动):
  * - 上图:每小时总花费折线(¥)
- * - 下图:每小时 Token 组成堆叠柱(缓存命中 / 缓存未命中 / 输出)
+ * - 下图:每小时 Token 组成堆叠柱(缓存命中 / 缓存写入 / 缓存未命中 / 输出)
  *
- * 数据:dailyTrends —— 当天每小时数据,来自 /api/dashboard/trends/hourly。
- * 每个点字段:hour|timestamp、quota_used、input_tokens、completion_tokens、cache_hit_tokens。
+ * 数据:dailyTrends —— 当天完整小时缓存与当前小时实时数据的合并结果。
+ * 每个点字段:hour|timestamp、quota_used、input_tokens、completion_tokens、cache_hit_tokens、cache_write_tokens。
  */
 
 import { useMemo } from 'react'
@@ -14,7 +14,7 @@ import ReactECharts from 'echarts-for-react'
 import type { EChartsOption } from 'echarts'
 import { Card, CardContent, CardHeader, CardTitle } from './ui/card'
 import { Wallet, BarChart3 } from 'lucide-react'
-import { formatCost, formatTokens, QUOTA_PER_YUAN } from '../lib/format'
+import { formatCostPrecise, formatTokens, QUOTA_PER_YUAN } from '../lib/format'
 
 interface DailyTrend {
   date?: string
@@ -36,10 +36,10 @@ export interface SpendAnalyticsProps {
 }
 
 const COLOR_COST = '#0ea5e9' // sky —— 花费折线
-const COLOR_HIT = '#22c55e' // green —— 缓存命中
-const COLOR_MISS = '#6366f1' // indigo —— 缓存未命中
-const COLOR_OUT = '#f59e0b' // amber —— 输出
-const MIN_OUTPUT_BAR_HEIGHT = 14
+const COLOR_HIT = '#6ee7b7' // soft green —— 缓存命中
+const COLOR_WRITE = '#f9a8d4' // soft pink —— 缓存写入
+const COLOR_MISS = '#a5b4fc' // soft indigo —— 缓存未命中
+const COLOR_OUT = '#fcd34d' // soft amber —— 输出
 const TOKEN_AXIS_HEADROOM = 1.1
 const TOKEN_BAR_MAX_WIDTH = 56
 
@@ -56,10 +56,24 @@ function hourLabel(d: DailyTrend): string {
   return ''
 }
 
+function formatSignificant(n: number, digits = 3): string {
+  if (!Number.isFinite(n) || n === 0) return '0'
+  const decimals = Math.max(0, digits - 1 - Math.floor(Math.log10(Math.abs(n))))
+  return n.toFixed(decimals)
+}
+
+function formatTooltipTokens(n: number): string {
+  if (!Number.isFinite(n)) return '0'
+  if (Math.abs(n) >= 1_000_000) return `${formatSignificant(n / 1_000_000)}M`
+  if (Math.abs(n) >= 1_000) return `${formatSignificant(n / 1_000)}k`
+  return Math.round(n).toLocaleString('zh-CN')
+}
+
 interface ChartModel {
   cats: string[]
   cost: number[] // ¥
   hit: number[]
+  write: number[]
   miss: number[]
   out: number[]
   totalCost: number // raw quota
@@ -72,6 +86,7 @@ export function SpendAnalytics({ dailyTrends, loading }: SpendAnalyticsProps) {
     const cats: string[] = []
     const cost: number[] = []
     const hit: number[] = []
+    const write: number[] = []
     const miss: number[] = []
     const out: number[] = []
     let totalCost = 0
@@ -83,16 +98,19 @@ export function SpendAnalytics({ dailyTrends, loading }: SpendAnalyticsProps) {
       totalReq += Number(d.request_count || 0)
       cost.push(Number((quota / QUOTA_PER_YUAN).toFixed(4)))
       const h = Number(d.cache_hit_tokens || 0)
+      const w = Number(d.cache_write_tokens || 0)
       const input = Number(d.input_tokens ?? d.prompt_tokens ?? 0)
-      const m = Math.max(0, input - h)
+      const m = Math.max(0, input - h - w)
       const o = Number(d.completion_tokens || 0)
       hit.push(h)
+      write.push(w)
       miss.push(m)
       out.push(o)
     }
     const totalTok =
-      hit.reduce((s, v) => s + v, 0) + miss.reduce((s, v) => s + v, 0) + out.reduce((s, v) => s + v, 0)
-    return { cats, cost, hit, miss, out, totalCost, totalReq, totalTok }
+      hit.reduce((s, v) => s + v, 0) + write.reduce((s, v) => s + v, 0) +
+      miss.reduce((s, v) => s + v, 0) + out.reduce((s, v) => s + v, 0)
+    return { cats, cost, hit, write, miss, out, totalCost, totalReq, totalTok }
   }, [dailyTrends])
 
   const option = useMemo<EChartsOption>(() => buildOption(model), [model])
@@ -111,7 +129,7 @@ export function SpendAnalytics({ dailyTrends, loading }: SpendAnalyticsProps) {
             </CardTitle>
           </div>
           <div className="text-right">
-            <div className="text-2xl font-bold text-primary tabular-nums">{formatCost(model.totalCost)}</div>
+            <div className="text-2xl font-bold text-primary tabular-nums">{formatCostPrecise(model.totalCost)}</div>
             <div className="text-xs text-muted-foreground tabular-nums">
               {model.totalReq.toLocaleString()} 请求 · {formatTokens(model.totalTok)} Token
             </div>
@@ -145,7 +163,13 @@ function buildOption(m: ChartModel): EChartsOption {
   const labelColor = 'rgba(130,130,130,0.95)'
 
   const dot = (c: string) =>
-    `<span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${c};margin-right:6px"></span>`
+    `<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${c}"></span>`
+
+  const tooltipRow = (color: string, label: string, value: string, ratio = '') =>
+    `<div style="display:grid;grid-template-columns:7px 64px 66px 48px;column-gap:7px;align-items:center;line-height:22px">` +
+    `${dot(color)}<span style="color:#64748b">${label}</span>` +
+    `<span style="text-align:right;color:#334155;font-weight:600;font-variant-numeric:tabular-nums">${value}</span>` +
+    `<span style="text-align:right;color:#94a3b8;font-size:11px;font-variant-numeric:tabular-nums">${ratio}</span></div>`
 
   return {
     animationDuration: 400,
@@ -160,6 +184,14 @@ function buildOption(m: ChartModel): EChartsOption {
     tooltip: {
       trigger: 'axis',
       axisPointer: { type: 'cross' },
+      backgroundColor: 'rgba(255,255,255,0.96)',
+      borderColor: 'rgba(148,163,184,0.28)',
+      borderWidth: 1,
+      padding: [10, 12],
+      textStyle: { color: '#475569', fontSize: 12 },
+      confine: true,
+      transitionDuration: 0.12,
+      extraCssText: 'border-radius:8px;box-shadow:0 14px 36px rgba(15,23,42,0.11);backdrop-filter:blur(10px);font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;',
       formatter: (params: any) => {
         const arr = Array.isArray(params) ? params : [params]
         if (!arr.length) return ''
@@ -167,18 +199,24 @@ function buildOption(m: ChartModel): EChartsOption {
         const hour = m.cats[idx] ?? ''
         const cost = m.cost[idx] ?? 0
         const hit = m.hit[idx] ?? 0
+        const write = m.write[idx] ?? 0
         const miss = m.miss[idx] ?? 0
         const out = m.out[idx] ?? 0
-        const tot = hit + miss + out
-        const pct = (v: number) => (tot > 0 ? ((v / tot) * 100).toFixed(1) : '0.0')
+        const tot = hit + write + miss + out
+        const pct = (v: number) => (tot > 0 ? formatSignificant((v / tot) * 100) : '0')
         return [
-          `<div style="font-weight:600;margin-bottom:4px">${hour}</div>`,
-          `<div>${dot(COLOR_COST)}花费 <b>¥${cost.toFixed(2)}</b></div>`,
-          `<div style="margin-top:4px;border-top:1px solid rgba(120,120,120,0.2);padding-top:4px">`,
-          `<div>${dot(COLOR_HIT)}缓存命中 ${formatTokens(hit)} (${pct(hit)}%)</div>`,
-          `<div>${dot(COLOR_MISS)}缓存未命中 ${formatTokens(miss)} (${pct(miss)}%)</div>`,
-          `<div>${dot(COLOR_OUT)}输出 ${formatTokens(out)} (${pct(out)}%)</div>`,
-          `<div style="margin-top:2px;color:#888">合计 ${formatTokens(tot)} Token</div>`,
+          `<div style="display:flex;align-items:center;justify-content:space-between;gap:24px;margin-bottom:7px">` +
+          `<strong style="font-size:13px;color:#334155">${hour}</strong>` +
+          `<span style="display:flex;align-items:baseline;gap:6px"><span style="color:#94a3b8;font-size:11px">花费</span>` +
+          `<strong style="color:${COLOR_COST};font-variant-numeric:tabular-nums">¥${cost.toFixed(2)}</strong></span></div>`,
+          `<div style="border-top:1px solid rgba(148,163,184,0.20);padding-top:5px">`,
+          tooltipRow(COLOR_HIT, '缓存命中', formatTooltipTokens(hit), `${pct(hit)}%`),
+          tooltipRow(COLOR_WRITE, '缓存写入', formatTooltipTokens(write), `${pct(write)}%`),
+          tooltipRow(COLOR_MISS, '缓存未命中', formatTooltipTokens(miss), `${pct(miss)}%`),
+          tooltipRow(COLOR_OUT, '输出', formatTooltipTokens(out), `${pct(out)}%`),
+          `<div style="display:flex;align-items:center;justify-content:space-between;margin-top:5px;padding-top:7px;border-top:1px solid rgba(148,163,184,0.20);font-variant-numeric:tabular-nums">` +
+          `<span style="color:#64748b">总 Token</span>` +
+          `<strong style="color:#0f172a;font-size:13px">${formatTooltipTokens(tot)}</strong></div>`,
           `</div>`,
         ].join('')
       },
@@ -193,7 +231,7 @@ function buildOption(m: ChartModel): EChartsOption {
         textStyle: { color: labelColor, fontSize: 10 },
       },
       {
-        data: ['缓存命中', '缓存未命中', '输出'],
+        data: ['缓存命中', '缓存写入', '缓存未命中', '输出'],
         left: 72,
         top: 232,
         itemWidth: 12,
@@ -287,24 +325,49 @@ function buildOption(m: ChartModel): EChartsOption {
         name: '缓存命中', type: 'bar', stack: 'tok', xAxisIndex: 1, yAxisIndex: 1, data: m.hit,
         barMaxWidth: TOKEN_BAR_MAX_WIDTH,
         itemStyle: { color: COLOR_HIT },
-        label: { show: true, position: 'inside', color: '#fff', fontSize: 9, formatter: (p: any) => (Number(p.value) > 0 ? formatTokens(Number(p.value)) : '') },
-        labelLayout: { hideOverlap: true },
+        label: { show: false },
+      },
+      {
+        name: '缓存写入', type: 'bar', stack: 'tok', xAxisIndex: 1, yAxisIndex: 1, data: m.write,
+        barMaxWidth: TOKEN_BAR_MAX_WIDTH,
+        itemStyle: { color: COLOR_WRITE },
+        label: { show: false },
       },
       {
         name: '缓存未命中', type: 'bar', stack: 'tok', xAxisIndex: 1, yAxisIndex: 1, data: m.miss,
         barMaxWidth: TOKEN_BAR_MAX_WIDTH,
         itemStyle: { color: COLOR_MISS },
-        label: { show: true, position: 'inside', color: '#fff', fontSize: 9, formatter: (p: any) => (Number(p.value) > 0 ? formatTokens(Number(p.value)) : '') },
-        labelLayout: { hideOverlap: true },
+        label: { show: false },
       },
       {
         name: '输出', type: 'bar', stack: 'tok', xAxisIndex: 1, yAxisIndex: 1,
-        data: m.out.map((value) => (value > 0 ? value : null)),
+        data: m.out.map(value => (value > 0 ? value : null)),
         barMaxWidth: TOKEN_BAR_MAX_WIDTH,
-        barMinHeight: MIN_OUTPUT_BAR_HEIGHT,
         itemStyle: { color: COLOR_OUT, borderRadius: [3, 3, 0, 0] },
-        label: { show: true, position: 'inside', color: '#fff', fontSize: 9, formatter: (p: any) => (Number(p.value) > 0 ? formatTokens(Number(p.value)) : '') },
-        labelLayout: { hideOverlap: true },
+        label: { show: false },
+      },
+      {
+        name: '总 Token',
+        type: 'scatter',
+        xAxisIndex: 1,
+        yAxisIndex: 1,
+        data: m.cats.map((_, index) =>
+          (m.hit[index] || 0) + (m.write[index] || 0) + (m.miss[index] || 0) + (m.out[index] || 0)
+        ),
+        symbolSize: 1,
+        itemStyle: { color: 'transparent' },
+        silent: true,
+        tooltip: { show: false },
+        z: 10,
+        label: {
+          show: true,
+          position: 'top',
+          distance: 4,
+          color: '#64748b',
+          fontSize: 10,
+          fontWeight: 600,
+          formatter: (p: any) => Number(p.value) > 0 ? formatTooltipTokens(Number(p.value)) : '',
+        },
       },
     ],
   }

@@ -147,7 +147,12 @@ export function Dashboard() {
   const { showToast } = useToast()
   const [overview, setOverview] = useState<SystemOverview | null>(null)
   const [usage, setUsage] = useState<UsageStatistics | null>(null)
-  const [dailyTrends, setDailyTrends] = useState<DailyTrend[]>(readCachedDailyTrends)
+  const [completedHourlyTrends, setCompletedHourlyTrends] = useState<DailyTrend[]>(readCachedDailyTrends)
+  const completedHourlyTrendsRef = useRef(completedHourlyTrends)
+  const [currentHourlyTrends, setCurrentHourlyTrends] = useState<DailyTrend[]>([])
+  const currentHourlyRequestRef = useRef<Promise<boolean> | null>(null)
+  const missingHourlyRequestRef = useRef<Promise<void> | null>(null)
+  const dailyTrends = mergeDailyTrends(completedHourlyTrends, currentHourlyTrends)
   const [trendsLoading, setTrendsLoading] = useState(true)
   const [analyticsSummary, setAnalyticsSummary] = useState<AnalyticsSummary | null>(null)
   const [loading, setLoading] = useState(true)
@@ -250,22 +255,124 @@ export function Dashboard() {
     return false
   }, [apiUrl, getAuthHeaders, period])
 
-  const mergePreviousHourlyTrend = useCallback((trends: DailyTrend[]) => {
-    setDailyTrends(current => {
-      const merged = mergeDailyTrends(current, trends)
-      cacheDailyTrends(merged)
-      return merged
-    })
+  const mergeCompletedHourlyTrends = useCallback((trends: DailyTrend[]) => {
+    const completedKeys = new Set(trends.map(trendHourKey).filter(Boolean))
+    const merged = mergeDailyTrends(completedHourlyTrendsRef.current, trends)
+    completedHourlyTrendsRef.current = merged
+    setCompletedHourlyTrends(merged)
+    cacheDailyTrends(merged)
+    setCurrentHourlyTrends(current => current.filter(trend => !completedKeys.has(trendHourKey(trend))))
   }, [])
 
-  // 花费分析独立按整点增量更新，每次只查询上一个完整小时。
+  const replaceCurrentHourlyTrend = useCallback((trends: DailyTrend[]) => {
+    const currentHour = localHourKey(new Date())
+    setCurrentHourlyTrends(trends.filter(trend => trendHourKey(trend) === currentHour))
+  }, [])
+
+  // 当前小时独立短轮询，只覆盖尚未结算的实时数据。
+  const fetchCurrentHourlyTrend = useCallback(async (noCache = false, signal?: AbortSignal): Promise<boolean> => {
+    if (currentHourlyRequestRef.current) return currentHourlyRequestRef.current
+
+    const request = (async () => {
+      try {
+        if (MOCK_MODE) {
+          await delay(120)
+          const currentHour = localHourKey(new Date())
+          replaceCurrentHourlyTrend(mockDashboardData.getToday().filter(item => item.hour === currentHour))
+          return true
+        }
+
+        const cacheParam = noCache ? '?no_cache=true' : ''
+        const response = await fetch(
+          `${apiUrl}/api/dashboard/trends/hourly/current${cacheParam}`,
+          { headers: getAuthHeaders(), signal },
+        )
+        const data = await response.json()
+        if (data.success && Array.isArray(data.data)) {
+          replaceCurrentHourlyTrend(data.data)
+          return true
+        }
+      } catch (error) {
+        if (!signal?.aborted) console.error('Failed to fetch current hourly trend:', error)
+      }
+      return false
+    })()
+
+    currentHourlyRequestRef.current = request
+    try {
+      return await request
+    } finally {
+      if (currentHourlyRequestRef.current === request) currentHourlyRequestRef.current = null
+    }
+  }, [apiUrl, getAuthHeaders, replaceCurrentHourlyTrend])
+
+  // 完整小时只会进入历史缓存，不参与实时轮询。
+  const fetchCompletedHourlyTrend = useCallback(async (hourStart: Date, signal?: AbortSignal): Promise<boolean> => {
+    try {
+      if (MOCK_MODE) {
+        await delay(80)
+        const hour = localHourKey(hourStart)
+        mergeCompletedHourlyTrends(mockDashboardData.getToday().filter(item => item.hour === hour))
+        return true
+      }
+
+      const start = Math.floor(hourStart.getTime() / 1_000)
+      const response = await fetch(
+        `${apiUrl}/api/dashboard/trends/hourly/completed?start=${start}`,
+        { headers: getAuthHeaders(), signal },
+      )
+      const data = await response.json()
+      if (data.success && Array.isArray(data.data)) {
+        mergeCompletedHourlyTrends(data.data)
+        return true
+      }
+    } catch (error) {
+      if (!signal?.aborted) console.error('Failed to fetch completed hourly trend:', error)
+    }
+    return false
+  }, [apiUrl, getAuthHeaders, mergeCompletedHourlyTrends])
+
+  // 已有完整小时不会重复请求；缓存缺失时按最近到最早逐小时补齐。
+  const fetchMissingCompletedHourlyTrends = useCallback(async (signal?: AbortSignal): Promise<void> => {
+    if (missingHourlyRequestRef.current) return missingHourlyRequestRef.current
+
+    const request = (async () => {
+      const today = localDayKey()
+      const cursor = new Date()
+      cursor.setMinutes(0, 0, 0)
+      cursor.setHours(cursor.getHours() - 1)
+      const missing: Date[] = []
+
+      while (localDayKey(cursor) === today) {
+        const hour = localHourKey(cursor)
+        if (!completedHourlyTrendsRef.current.some(trend => trendHourKey(trend) === hour)) {
+          missing.push(new Date(cursor))
+        }
+        cursor.setHours(cursor.getHours() - 1)
+      }
+
+      for (const hourStart of missing) {
+        if (signal?.aborted) return
+        if (!await fetchCompletedHourlyTrend(hourStart, signal)) return
+      }
+    })()
+
+    missingHourlyRequestRef.current = request
+    try {
+      await request
+    } finally {
+      if (missingHourlyRequestRef.current === request) missingHourlyRequestRef.current = null
+    }
+  }, [fetchCompletedHourlyTrend])
+
+  // 整点后只结算上一个完整小时一次。
   const fetchPreviousHourlyTrend = useCallback(async (signal?: AbortSignal): Promise<boolean> => {
     try {
       if (MOCK_MODE) {
         await delay(200)
         const previousHour = new Date(Date.now() - 60 * 60 * 1000)
         const trend = mockDashboardData.getToday().filter(item => item.hour === localHourKey(previousHour))
-        mergePreviousHourlyTrend(trend)
+        mergeCompletedHourlyTrends(trend)
         return true
       }
 
@@ -275,14 +382,14 @@ export function Dashboard() {
       )
       const data = await response.json()
       if (data.success && Array.isArray(data.data)) {
-        mergePreviousHourlyTrend(data.data)
+        mergeCompletedHourlyTrends(data.data)
         return true
       }
     } catch (error) {
       if (!signal?.aborted) console.error('Failed to fetch previous hourly trend:', error)
     }
     return false
-  }, [apiUrl, getAuthHeaders, mergePreviousHourlyTrend])
+  }, [apiUrl, getAuthHeaders, mergeCompletedHourlyTrends])
 
   const fetchAnalyticsSummary = useCallback(async (noCache = false, signal?: AbortSignal): Promise<boolean> => {
     try {
@@ -335,7 +442,7 @@ export function Dashboard() {
   const refreshAll = useCallback(async (signal?: AbortSignal): Promise<boolean> => {
     if (MOCK_MODE) {
       const results = await Promise.all([
-        mockOverview(), mockUsage(), mockAnalyticsSummary(),
+        mockOverview(), mockUsage(), mockAnalyticsSummary(), fetchCurrentHourlyTrend(true, signal),
       ])
       return results.every(Boolean)
     }
@@ -343,43 +450,56 @@ export function Dashboard() {
       fetchOverview(true, signal),
       fetchUsage(true, signal),
       fetchAnalyticsSummary(true, signal),
+      fetchCurrentHourlyTrend(true, signal),
     ])
     return results.every(Boolean)
-  }, [fetchOverview, fetchUsage, fetchAnalyticsSummary, mockOverview, mockUsage, mockAnalyticsSummary])
+  }, [fetchOverview, fetchUsage, fetchAnalyticsSummary, fetchCurrentHourlyTrend, mockOverview, mockUsage, mockAnalyticsSummary])
 
   useEffect(() => {
     const controller = new AbortController()
-    let timerId: number | undefined
+    let boundaryTimerId: number | undefined
     let active = true
 
-    const scheduleNext = () => {
-      timerId = window.setTimeout(async () => {
-        await fetchPreviousHourlyTrend(controller.signal)
-        if (active) scheduleNext()
+    const scheduleNextBoundary = () => {
+      boundaryTimerId = window.setTimeout(async () => {
+        if (document.visibilityState === 'visible') {
+          await fetchPreviousHourlyTrend(controller.signal)
+          await fetchCurrentHourlyTrend(true, controller.signal)
+        }
+        if (active) scheduleNextBoundary()
       }, msUntilNextHourlyRefresh())
     }
 
-    const loadPreviousHour = async () => {
+    const loadCurrentHour = async () => {
       try {
-        await fetchPreviousHourlyTrend(controller.signal)
+        await fetchCurrentHourlyTrend(false, controller.signal)
       } finally {
-        if (active) {
-          setTrendsLoading(false)
-          scheduleNext()
-        }
+        if (active) setTrendsLoading(false)
       }
     }
 
-    loadPreviousHour()
+    const handleVisibilityChange = () => {
+      if (document.visibilityState !== 'visible') return
+      void fetchCurrentHourlyTrend(false, controller.signal)
+      void fetchMissingCompletedHourlyTrends(controller.signal)
+    }
+
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    void loadCurrentHour()
+    void fetchMissingCompletedHourlyTrends(controller.signal)
+    scheduleNextBoundary()
+
     return () => {
       active = false
       controller.abort()
-      if (timerId !== undefined) window.clearTimeout(timerId)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+      if (boundaryTimerId !== undefined) window.clearTimeout(boundaryTimerId)
     }
-  }, [fetchPreviousHourlyTrend])
+  }, [fetchCurrentHourlyTrend, fetchMissingCompletedHourlyTrends, fetchPreviousHourlyTrend])
 
   // 获取系统规模信息（仅首次加载）
   const fetchSystemInfo = useCallback(async () => {
+    if (MOCK_MODE) return
     try {
       const response = await fetch(
         `${apiUrl}/api/dashboard/system-info`,

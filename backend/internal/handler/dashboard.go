@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 
@@ -17,7 +18,9 @@ func RegisterDashboardRoutes(r *gin.RouterGroup) {
 		g.GET("/models", GetModelUsage)
 		g.GET("/trends/daily", GetDailyTrends)
 		g.GET("/trends/hourly", GetHourlyTrends)
+		g.GET("/trends/hourly/current", GetCurrentHourlyTrend)
 		g.GET("/trends/hourly/previous", GetPreviousHourlyTrend)
+		g.GET("/trends/hourly/completed", GetCompletedHourlyTrend)
 		g.GET("/top-users", GetTopUsers)
 		g.GET("/channels", GetChannelStatus)
 		g.POST("/cache/invalidate", InvalidateDashboardCache)
@@ -102,6 +105,19 @@ func GetHourlyTrends(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": data})
 }
 
+// GET /api/dashboard/trends/hourly/current
+func GetCurrentHourlyTrend(c *gin.Context) {
+	noCache := c.Query("no_cache") == "true"
+	svc := service.NewDashboardService()
+
+	data, err := svc.GetCurrentHourlyTrend(noCache)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "error": gin.H{"message": err.Error()}})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": data})
+}
+
 // GET /api/dashboard/trends/hourly/previous
 func GetPreviousHourlyTrend(c *gin.Context) {
 	noCache := c.Query("no_cache") == "true"
@@ -110,6 +126,28 @@ func GetPreviousHourlyTrend(c *gin.Context) {
 	data, err := svc.GetPreviousHourlyTrend(noCache)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "error": gin.H{"message": err.Error()}})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": data})
+}
+
+// GET /api/dashboard/trends/hourly/completed
+func GetCompletedHourlyTrend(c *gin.Context) {
+	startUnix, err := strconv.ParseInt(c.Query("start"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": gin.H{"message": "valid start timestamp is required"}})
+		return
+	}
+
+	noCache := c.Query("no_cache") == "true"
+	svc := service.NewDashboardService()
+	data, err := svc.GetCompletedHourlyTrend(startUnix, noCache)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, service.ErrInvalidCompletedHour) {
+			status = http.StatusBadRequest
+		}
+		c.JSON(status, gin.H{"success": false, "error": gin.H{"message": err.Error()}})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": data})

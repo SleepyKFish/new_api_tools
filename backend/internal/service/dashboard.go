@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -14,6 +15,10 @@ import (
 type DashboardService struct {
 	db *database.Manager
 }
+
+const currentHourlyTrendCacheTTL = 10 * time.Second
+
+var ErrInvalidCompletedHour = errors.New("hour start must identify a completed hour from today")
 
 // NewDashboardService creates a new DashboardService
 func NewDashboardService() *DashboardService {
@@ -459,9 +464,47 @@ func (s *DashboardService) GetHourlyTrends(hours int, noCache bool, compareMode 
 	return result, nil
 }
 
+// GetCurrentHourlyTrend returns the live aggregate for the current local-time hour.
+func (s *DashboardService) GetCurrentHourlyTrend(noCache bool) ([]map[string]interface{}, error) {
+	start, end := currentHourRange(time.Now())
+	_, tzOffset := start.Zone()
+	hourGroup := (start.Unix() + int64(tzOffset)) / 3600
+	cacheKey := fmt.Sprintf("dashboard:hourly:current:v2:%d", hourGroup)
+	cm := cache.Get()
+
+	if !noCache {
+		var cached []map[string]interface{}
+		if found, _ := cm.GetJSON(cacheKey, &cached); found {
+			return cached, nil
+		}
+	}
+
+	rows, err := s.queryHourlyTrendRange(start.Unix(), end.Unix(), tzOffset)
+	if err != nil {
+		return nil, err
+	}
+
+	result := fillHourlyGapsAt(rows, 1, tzOffset, start)
+	cm.Set(cacheKey, result, currentHourlyTrendCacheTTL)
+	return result, nil
+}
+
 // GetPreviousHourlyTrend returns the last fully completed local-time hour.
 func (s *DashboardService) GetPreviousHourlyTrend(noCache bool) ([]map[string]interface{}, error) {
 	start, end := previousCompleteHourRange(time.Now())
+	return s.getCompletedHourlyTrend(start, end, noCache)
+}
+
+// GetCompletedHourlyTrend returns one completed hour from the current local day.
+func (s *DashboardService) GetCompletedHourlyTrend(startUnix int64, noCache bool) ([]map[string]interface{}, error) {
+	start, end, err := completedHourRange(startUnix, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	return s.getCompletedHourlyTrend(start, end, noCache)
+}
+
+func (s *DashboardService) getCompletedHourlyTrend(start, end time.Time, noCache bool) ([]map[string]interface{}, error) {
 	_, tzOffset := start.Zone()
 	hourGroup := (start.Unix() + int64(tzOffset)) / 3600
 	cacheKey := fmt.Sprintf("dashboard:hourly:completed:v2:%d", hourGroup)
@@ -484,8 +527,25 @@ func (s *DashboardService) GetPreviousHourlyTrend(noCache bool) ([]map[string]in
 	return result, nil
 }
 
+func currentHourRange(now time.Time) (time.Time, time.Time) {
+	start := time.Date(now.Year(), now.Month(), now.Day(), now.Hour(), 0, 0, 0, now.Location())
+	return start, now
+}
+
+func completedHourRange(startUnix int64, now time.Time) (time.Time, time.Time, error) {
+	start := time.Unix(startUnix, 0).In(now.Location())
+	start = time.Date(start.Year(), start.Month(), start.Day(), start.Hour(), 0, 0, 0, start.Location())
+	currentStart, _ := currentHourRange(now)
+	todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+
+	if start.Unix() != startUnix || start.Before(todayStart) || !start.Before(currentStart) {
+		return time.Time{}, time.Time{}, ErrInvalidCompletedHour
+	}
+	return start, start.Add(time.Hour), nil
+}
+
 func previousCompleteHourRange(now time.Time) (time.Time, time.Time) {
-	end := time.Date(now.Year(), now.Month(), now.Day(), now.Hour(), 0, 0, 0, now.Location())
+	end, _ := currentHourRange(now)
 	return end.Add(-time.Hour), end
 }
 
@@ -894,14 +954,14 @@ func fillDailyGaps(rows []map[string]interface{}, days int, tzOffset int) []map[
 			result = append(result, existing)
 		} else {
 			result = append(result, map[string]interface{}{
-				"date":          dateStr,
-				"timestamp":     ts,
-				"request_count": int64(0),
-				"quota_used":    int64(0),
-				"unique_users":  int64(0),
-				"prompt_tokens":  int64(0),
-				"completion_tokens": int64(0),
-				"cache_hit_tokens":  int64(0),
+				"date":               dateStr,
+				"timestamp":          ts,
+				"request_count":      int64(0),
+				"quota_used":         int64(0),
+				"unique_users":       int64(0),
+				"prompt_tokens":      int64(0),
+				"completion_tokens":  int64(0),
+				"cache_hit_tokens":   int64(0),
 				"cache_write_tokens": int64(0),
 			})
 		}
@@ -944,14 +1004,14 @@ func fillHourlyGapsAt(rows []map[string]interface{}, hours int, tzOffset int, an
 			result = append(result, existing)
 		} else {
 			result = append(result, map[string]interface{}{
-				"hour":          hourStr,
-				"timestamp":     ts,
-				"request_count": int64(0),
-				"quota_used":    int64(0),
-				"prompt_tokens":  int64(0),
-				"completion_tokens": int64(0),
-				"input_tokens":      int64(0),
-				"cache_hit_tokens":  int64(0),
+				"hour":               hourStr,
+				"timestamp":          ts,
+				"request_count":      int64(0),
+				"quota_used":         int64(0),
+				"prompt_tokens":      int64(0),
+				"completion_tokens":  int64(0),
+				"input_tokens":       int64(0),
+				"cache_hit_tokens":   int64(0),
 				"cache_write_tokens": int64(0),
 			})
 		}
