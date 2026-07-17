@@ -335,24 +335,12 @@ function buildOption(m: ChartModel): EChartsOption {
       itemWidth: 18,
       itemHeight: 8,
       itemGap: 18,
-      textStyle: {
-        color: labelColor,
-        fontSize: 11,
-        // rich 让相对周次小一号 + 浅灰,与 tooltip 行的视觉层级一致
-        rich: {
-          ctx: {
-            color: '#94a3b8',
-            fontSize: 9,
-            fontWeight: 'normal',
-            padding: [0, 0, 0, 0],
-          },
-        },
-      },
+      textStyle: { color: labelColor, fontSize: 11 },
       // 图例默认只显示 series.name(就是周日期范围),通过 formatter 拼接相对周次
       formatter: (name: string) => {
         const idx = m.weeks.findIndex(w => weekRangeLabel(w.key) === name)
         if (idx === -1) return name
-        return `${name} {ctx|${relativeWeekLabel(idx, m.weeks.length)}}`
+        return `${name} ${relativeWeekLabel(idx, m.weeks.length)}`
       },
     },
     // 三个子图各一个标题(ECharts graphic 简化为 title 数组)
