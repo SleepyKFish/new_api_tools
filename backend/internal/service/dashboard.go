@@ -464,7 +464,7 @@ func (s *DashboardService) GetPreviousHourlyTrend(noCache bool) ([]map[string]in
 	start, end := previousCompleteHourRange(time.Now())
 	_, tzOffset := start.Zone()
 	hourGroup := (start.Unix() + int64(tzOffset)) / 3600
-	cacheKey := fmt.Sprintf("dashboard:hourly:completed:%d", hourGroup)
+	cacheKey := fmt.Sprintf("dashboard:hourly:completed:v2:%d", hourGroup)
 	cm := cache.Get()
 
 	if !noCache {
@@ -517,6 +517,10 @@ func (s *DashboardService) queryHourlyTrends(startUnix int64, hours int, tzOffse
 // queryHourlyTrendRange aggregates token and spend metrics inside one bounded interval.
 func (s *DashboardService) queryHourlyTrendRange(startUnix, endUnix int64, tzOffset int) ([]map[string]interface{}, error) {
 	hourGroupExpr := fmt.Sprintf("FLOOR((created_at + %d) / 3600)", tzOffset)
+	modelMetrics := &ModelStatusService{db: s.db}
+	inputTokensExpr := modelMetrics.normalizedInputTokensExpr("prompt_tokens", "other")
+	cacheReadExpr := modelMetrics.jsonNumberExpr("other", "cache_tokens")
+	cacheWriteExpr := modelMetrics.cacheWriteTokensExpr("other")
 
 	query := s.db.RebindQuery(fmt.Sprintf(`
 		SELECT %s as hour_group,
@@ -524,17 +528,14 @@ func (s *DashboardService) queryHourlyTrendRange(startUnix, endUnix int64, tzOff
 			COALESCE(SUM(quota), 0) as quota_used,
 			COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
 			COALESCE(SUM(completion_tokens), 0) as completion_tokens,
-			COALESCE(SUM(CASE WHEN other IS NOT NULL AND other <> '' AND JSON_VALID(other)
-				THEN CAST(JSON_UNQUOTE(JSON_EXTRACT(other, '$.cache_tokens')) AS UNSIGNED)
-				ELSE 0 END), 0) as cache_hit_tokens,
-			COALESCE(SUM(CASE WHEN other IS NOT NULL AND other <> '' AND JSON_VALID(other)
-				THEN CAST(JSON_UNQUOTE(JSON_EXTRACT(other, '$.cache_write_tokens')) AS UNSIGNED)
-				ELSE 0 END), 0) as cache_write_tokens
+			COALESCE(SUM(%s), 0) as input_tokens,
+			COALESCE(SUM(%s), 0) as cache_hit_tokens,
+			COALESCE(SUM(%s), 0) as cache_write_tokens
 		FROM logs
 		WHERE created_at >= ? AND created_at < ? AND type = 2
 		GROUP BY %s
 		ORDER BY hour_group ASC`,
-		hourGroupExpr, hourGroupExpr))
+		hourGroupExpr, inputTokensExpr, cacheReadExpr, cacheWriteExpr, hourGroupExpr))
 
 	return s.db.QueryWithTimeout(15*time.Second, query, startUnix, endUnix)
 }
@@ -949,6 +950,7 @@ func fillHourlyGapsAt(rows []map[string]interface{}, hours int, tzOffset int, an
 				"quota_used":    int64(0),
 				"prompt_tokens":  int64(0),
 				"completion_tokens": int64(0),
+				"input_tokens":      int64(0),
 				"cache_hit_tokens":  int64(0),
 				"cache_write_tokens": int64(0),
 			})

@@ -6,7 +6,7 @@
  * - 下图:每小时 Token 组成堆叠柱(缓存命中 / 缓存未命中 / 输出)
  *
  * 数据:dailyTrends —— 当天每小时数据,来自 /api/dashboard/trends/hourly。
- * 每个点字段:hour|timestamp、quota_used、prompt_tokens、completion_tokens、cache_hit_tokens。
+ * 每个点字段:hour|timestamp、quota_used、input_tokens、completion_tokens、cache_hit_tokens。
  */
 
 import { useMemo } from 'react'
@@ -24,6 +24,7 @@ interface DailyTrend {
   quota_used: number
   unique_users?: number
   prompt_tokens?: number
+  input_tokens?: number
   completion_tokens?: number
   cache_hit_tokens?: number
   cache_write_tokens?: number
@@ -82,7 +83,8 @@ export function SpendAnalytics({ dailyTrends, loading }: SpendAnalyticsProps) {
       totalReq += Number(d.request_count || 0)
       cost.push(Number((quota / QUOTA_PER_YUAN).toFixed(4)))
       const h = Number(d.cache_hit_tokens || 0)
-      const m = Math.max(0, Number(d.prompt_tokens || 0) - h)
+      const input = Number(d.input_tokens ?? d.prompt_tokens ?? 0)
+      const m = Math.max(0, input - h)
       const o = Number(d.completion_tokens || 0)
       hit.push(h)
       miss.push(m)

@@ -11,7 +11,7 @@ import { MOCK_MODE } from '../lib/env'
 import { mockDashboardData } from './mockData'
 
 type RefreshInterval = 0 | 30 | 60 | 120 | 300 // 秒，0表示关闭
-const SPEND_TRENDS_CACHE_KEY = `dashboard_spend_hourly_v1:${MOCK_MODE ? 'mock' : 'live'}`
+const SPEND_TRENDS_CACHE_KEY = `dashboard_spend_hourly_v2:${MOCK_MODE ? 'mock' : 'live'}`
 const HOURLY_REFRESH_DELAY_MS = 5_000
 
 interface SystemOverview {
@@ -43,6 +43,7 @@ interface DailyTrend {
   quota_used: number
   unique_users?: number
   prompt_tokens?: number
+  input_tokens?: number
   completion_tokens?: number
   cache_hit_tokens?: number
   cache_write_tokens?: number

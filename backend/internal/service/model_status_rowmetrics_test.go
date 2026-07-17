@@ -2,7 +2,10 @@ package service
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
+
+	"github.com/new-api-tools/backend/internal/database"
 )
 
 // mustOtherString 把 map 序列化为 logs.other 的字符串形态(模拟从 DB 读出的原始行)。
@@ -36,7 +39,7 @@ func TestComputeRowMetricsGolden(t *testing.T) {
 		{
 			name: "stream success with frt and cache",
 			row: map[string]interface{}{
-				"type": int64(2), "use_time": 8.0, "prompt_tokens": 100.0,
+				"type": int64(2), "use_time": 8.0, "quota": 12345.0, "prompt_tokens": 100.0,
 				"completion_tokens": 50.0, "is_stream": true,
 			},
 			other: map[string]interface{}{"frt": 3000.0, "cache_tokens": 20.0},
@@ -48,7 +51,7 @@ func TestComputeRowMetricsGolden(t *testing.T) {
 				durationTimedRequests: 1, durationWithin10s: 1, durationWithin20s: 1,
 				outputRequests: 1, completionTokensSum: 50, useTimeSum: 5,
 				cacheTokensSum: 20, inputTokensSum: 100, outputTokensSum: 50,
-				cacheDenominatorSum: 100,
+				cacheDenominatorSum: 100, quotaSum: 12345,
 			},
 		},
 		{
@@ -158,7 +161,7 @@ func TestRowMetricsAccumulatorsConsistent(t *testing.T) {
 
 	row := map[string]interface{}{
 		"type": int64(2), "created_at": startTime + 100, "use_time": 6.0,
-		"prompt_tokens": 300.0, "completion_tokens": 120.0, "is_stream": true,
+		"quota": 6789.0, "prompt_tokens": 300.0, "completion_tokens": 120.0, "is_stream": true,
 		"other": `{"frt":2000,"claude":true,"cache_tokens":40,"cache_write_tokens":15}`,
 	}
 	m := computeRowMetrics(row, rules)
@@ -191,5 +194,34 @@ func TestRowMetricsAccumulatorsConsistent(t *testing.T) {
 	}
 	if perf.claudeRequests != 1 || daily.claudeRequests != 1 || slot.claudeRequests != 1 {
 		t.Errorf("claudeRequests diverged: slot=%d perf=%d daily=%d", slot.claudeRequests, perf.claudeRequests, daily.claudeRequests)
+	}
+	if slot.quotaSum != 6789 || perf.quotaSum != 6789 || daily.quotaSum != 6789 {
+		t.Errorf("quotaSum diverged: slot=%v perf=%v daily=%v", slot.quotaSum, perf.quotaSum, daily.quotaSum)
+	}
+}
+
+func TestPerformanceLogBaseColumnsIncludeQuota(t *testing.T) {
+	for _, column := range performanceLogBaseColumns() {
+		if column == "quota" {
+			return
+		}
+	}
+	t.Fatal("performance log scan must include quota")
+}
+
+func TestNormalizedInputTokensExprKeepsCacheSemantics(t *testing.T) {
+	svc := &ModelStatusService{db: &database.Manager{}}
+	expr := svc.normalizedInputTokensExpr("prompt_tokens", "other")
+
+	for _, fragment := range []string{
+		"input_tokens_total",
+		"cache_tokens",
+		"cache_write_tokens",
+		"/v1/messages",
+		"prompt_tokens",
+	} {
+		if !strings.Contains(expr, fragment) {
+			t.Errorf("normalized input SQL missing %q", fragment)
+		}
 	}
 }

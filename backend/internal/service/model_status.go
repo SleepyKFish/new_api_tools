@@ -436,6 +436,19 @@ func (s *ModelStatusService) jsonBoolExpr(jsonExpr, key string) string {
 	return fmt.Sprintf("LOWER(COALESCE(%s, '')) IN ('true', '1')", s.jsonTextExpr(jsonExpr, key))
 }
 
+func (s *ModelStatusService) claudeMessagesCondition(otherCol string) string {
+	requestPathExpr := s.requestPathExpr(otherCol)
+	requestConversionExpr := s.requestConversionExpr(otherCol)
+	isClaudeExpr := s.jsonBoolExpr(otherCol, "claude")
+	return fmt.Sprintf(`(
+		%s
+		OR %s LIKE '%%-> claude messages%%'
+		OR %s LIKE '%%->claude messages%%'
+		OR %s = 'claude messages'
+		OR (%s = '' AND %s LIKE '%%/v1/messages%%')
+	)`, isClaudeExpr, requestConversionExpr, requestConversionExpr, requestConversionExpr, requestConversionExpr, requestPathExpr)
+}
+
 // cacheWriteTokensExpr returns a SQL expression for "缓存写 tokens" with the
 // same three-level fallback the frontend uses in getUsageLogCacheSummary:
 //
@@ -453,6 +466,19 @@ func (s *ModelStatusService) cacheWriteTokensExpr(otherCol string) string {
 		WHEN ((%s) + (%s)) > 0 THEN GREATEST((%s) + (%s), (%s))
 		ELSE (%s)
 	END`, write, write, creation5m, creation1h, creation5m, creation1h, creation, creation)
+}
+
+// normalizedInputTokensExpr mirrors inputTokensFromLog for SQL aggregations.
+func (s *ModelStatusService) normalizedInputTokensExpr(promptCol, otherCol string) string {
+	explicit := s.jsonNumberExpr(otherCol, "input_tokens_total")
+	cacheRead := s.jsonNumberExpr(otherCol, "cache_tokens")
+	cacheWrite := s.cacheWriteTokensExpr(otherCol)
+	isClaude := s.claudeMessagesCondition(otherCol)
+	return fmt.Sprintf(`CASE
+		WHEN (%s) > 0 THEN (%s)
+		WHEN %s THEN COALESCE(%s, 0) + COALESCE((%s), 0) + COALESCE((%s), 0)
+		ELSE GREATEST(COALESCE(%s, 0), COALESCE((%s), 0))
+	END`, explicit, explicit, isClaude, promptCol, cacheRead, cacheWrite, promptCol, cacheRead)
 }
 
 func (s *ModelStatusService) cacheTokensSumSelect(alias string) string {
@@ -489,26 +515,11 @@ func (s *ModelStatusService) cacheDenominatorSumSelect(alias string) string {
 	}
 
 	otherCol := prefix + "other"
-	cacheTokensExpr := s.jsonNumberExpr(otherCol, "cache_tokens")
-	cacheWriteExpr := s.cacheWriteTokensExpr(otherCol)
-	requestPathExpr := s.requestPathExpr(otherCol)
-	requestConversionExpr := s.requestConversionExpr(otherCol)
-	isClaudeExpr := s.jsonBoolExpr(otherCol, "claude")
-	// Claude/Anthropic 语义: prompt_tokens 既不含缓存读也不含缓存写,所以分母 = 非缓存输入 + 缓存读 + 缓存写
-	// OpenAI-like: prompt_tokens 通常已含缓存读,缓存写罕见,沿用 MAX(prompt, cache_tokens) 近似
+	inputTokensExpr := s.normalizedInputTokensExpr(promptCol, otherCol)
 	return fmt.Sprintf(`COALESCE(SUM(CASE
-		WHEN %s = 2
-		THEN CASE
-			WHEN %s
-				OR %s LIKE '%%-> claude messages%%'
-				OR %s LIKE '%%->claude messages%%'
-				OR %s = 'claude messages'
-				OR (%s = '' AND %s LIKE '%%/v1/messages%%')
-			THEN COALESCE(%s, 0) + COALESCE((%s), 0) + COALESCE((%s), 0)
-			ELSE GREATEST(COALESCE(%s, 0), COALESCE((%s), 0))
-		END
+		WHEN %s = 2 THEN (%s)
 		ELSE 0
-	END), 0) as cache_denominator_sum`, typeCol, isClaudeExpr, requestConversionExpr, requestConversionExpr, requestConversionExpr, requestConversionExpr, requestPathExpr, promptCol, cacheTokensExpr, cacheWriteExpr, promptCol, cacheTokensExpr)
+	END), 0) as cache_denominator_sum`, typeCol, inputTokensExpr)
 }
 
 // ModelStatusService handles model availability monitoring
@@ -1045,17 +1056,22 @@ func cacheWriteTokensFromOther(other map[string]interface{}) float64 {
 	return creation
 }
 
-func (s *ModelStatusService) performanceLogColumns() string {
-	columns := []string{
+func performanceLogBaseColumns() []string {
+	return []string{
 		"id",
 		"created_at",
 		"model_name",
 		"channel_id",
 		"type",
 		"use_time",
+		"quota",
 		"prompt_tokens",
 		"completion_tokens",
 	}
+}
+
+func (s *ModelStatusService) performanceLogColumns() string {
+	columns := performanceLogBaseColumns()
 	if s.db.ColumnExists("logs", "is_stream") {
 		columns = append(columns, "is_stream")
 	} else {
@@ -1408,7 +1424,7 @@ func buildChannelPerformanceResult(channelID int64, channelName string, availabi
 }
 
 func channelModelDetailCacheKey(window string, channelID int64) string {
-	return fmt.Sprintf("model_status:channel_model_detail:v2:%s:%d", window, channelID)
+	return fmt.Sprintf("model_status:channel_model_detail:v3:%s:%d", window, channelID)
 }
 
 func buildChannelModelPerformanceDetails(
@@ -1495,7 +1511,7 @@ func (s *ModelStatusService) cacheChannelModelPerformanceDetails(
 
 func performanceSummaryCacheKey(window string, modelNames []string) string {
 	sum := sha1.Sum([]byte(strings.Join(modelNames, "\x00")))
-	return fmt.Sprintf("model_status:performance_summary:v1:%s:%x", window, sum)
+	return fmt.Sprintf("model_status:performance_summary:v2:%s:%x", window, sum)
 }
 
 // GetRealtimePerformanceSummary scans the live logs once (in batches) and
@@ -1656,7 +1672,7 @@ func (s *ModelStatusService) GetChannelPerformanceSummaries(window string, useCa
 	if len(useCache) > 0 {
 		useCachedResult = useCache[0]
 	}
-	cacheKey := fmt.Sprintf("model_status:channel_performance:v2:%s", window)
+	cacheKey := fmt.Sprintf("model_status:channel_performance:v3:%s", window)
 	cm := cache.Get()
 	var cached []map[string]interface{}
 	found, _ := cm.GetJSON(cacheKey, &cached)
