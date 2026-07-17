@@ -276,7 +276,10 @@ function buildOption(m: ChartModel): EChartsOption {
         // 日期右对齐配合 tabular-nums,数字风格也一致。
         const cols = '9px 38px 52px 60px 50px 60px 48px'
         const headerRow = (
-          `<div style="display:grid;grid-template-columns:${cols};column-gap:8px;font-size:10px;color:#94a3b8;margin-bottom:2px;align-items:center">` +
+          // header 颜色从 #94a3b8(slate-400)提到 #64748b(slate-500),
+          // 在白底上更清晰可读,但仍弱于加粗的数据值(#334155),
+          // 形成「表头 < 数据值」的层级关系。
+          `<div style="display:grid;grid-template-columns:${cols};column-gap:8px;font-size:10px;color:#64748b;font-weight:500;margin-bottom:2px;align-items:center">` +
           `<span></span><span></span><span></span>` +
           // 4 个数值列统一居中:cost/环比/Token/命中率字符数都在 4-8 之间,
           // 居中对齐后整列视觉对称,不再有列头右对齐、列内右对齐的错位感
