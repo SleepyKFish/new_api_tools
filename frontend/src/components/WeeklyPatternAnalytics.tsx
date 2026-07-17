@@ -270,6 +270,19 @@ function buildOption(m: ChartModel): EChartsOption {
         const dayIdx = arr[0].dataIndex
         const day = WEEK_LABELS[dayIdx] ?? ''
         const total = m.weeks.length
+        // 列定义:dot | date(右对齐) | context | cost | delta | token | rate
+        // 之前把 date+context 塞进 118px 单格,「本周」比「3周前」窄 1 字,
+        // 视觉上后面 4 列的锚点跟着漂移。拆成两列后所有行严格对齐,
+        // 日期右对齐配合 tabular-nums,数字风格也一致。
+        const cols = '9px 38px 52px 60px 50px 60px 48px'
+        const headerRow = (
+          `<div style="display:grid;grid-template-columns:${cols};column-gap:8px;font-size:10px;color:#94a3b8;margin-bottom:2px;align-items:center">` +
+          `<span></span><span></span><span></span>` +
+          `<span style="text-align:right">花费</span>` +
+          `<span style="text-align:right">环比</span>` +
+          `<span style="text-align:right">Token</span>` +
+          `<span style="text-align:right">命中率</span></div>`
+        )
         // 每个星期几,列出 4 周的 花费/Token/命中率
         // 每行用「具体日期 MM-DD」+「相对周次」取代原本的范围标签,
         // 避免用户看到「06-22 ~ 06-28」还要心算今天是周四的哪一天。
@@ -289,11 +302,12 @@ function buildOption(m: ChartModel): EChartsOption {
             const prevCost = i > 0 ? m.weeks[i - 1].cost[dayIdx] : null
             const deltaStr = deltaLabel(prevCost, cost)
             return (
-              `<div style="display:grid;grid-template-columns:9px 118px 60px 56px 60px 48px;column-gap:8px;align-items:center;line-height:22px">` +
+              `<div style="display:grid;grid-template-columns:${cols};column-gap:8px;align-items:center;line-height:22px">` +
               `${dot(color)}` +
-              // 第一段:具体日期(深色,加粗);第二段:相对周次(浅灰,小号)
-              `<span><span style="color:#334155;font-weight:600">${dateLabel}</span> ` +
-              `<span style="color:#94a3b8;font-size:10px">${weekCtx}</span></span>` +
+              // 日期:右对齐 + tabular-nums,与右侧数字列风格一致
+              `<span style="text-align:right;color:#334155;font-weight:600;font-variant-numeric:tabular-nums">${dateLabel}</span>` +
+              // 相对周次:浅灰小号,左对齐
+              `<span style="color:#94a3b8;font-size:10px">${weekCtx}</span>` +
               `<span style="text-align:right;color:#334155;font-weight:600;font-variant-numeric:tabular-nums">${costStr}</span>` +
               `<span style="text-align:right;font-variant-numeric:tabular-nums">${deltaStr}</span>` +
               `<span style="text-align:right;color:#334155;font-variant-numeric:tabular-nums">${tokStr}</span>` +
@@ -303,8 +317,7 @@ function buildOption(m: ChartModel): EChartsOption {
           .join('')
         return (
           `<div style="margin-bottom:6px"><strong style="font-size:13px;color:#334155">${day}</strong></div>` +
-          `<div style="display:grid;grid-template-columns:9px 118px 60px 56px 60px 48px;column-gap:8px;font-size:10px;color:#94a3b8;margin-bottom:2px">` +
-          `<span></span><span></span><span style="text-align:right">花费</span><span style="text-align:right">环比</span><span style="text-align:right">Token</span><span style="text-align:right">命中率</span></div>` +
+          headerRow +
           rows
         )
       },
