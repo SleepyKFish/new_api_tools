@@ -335,15 +335,26 @@ function buildOption(m: ChartModel): EChartsOption {
         itemStyle: { color: COLOR_COST },
         label: {
           show: true,
-          // 花费与缓存命中率两条折线在高位时纵向几乎同高,所有标签堆在图表上半区。
-          // line 系列 position 不接受回调,这里用 distance 横向偏移做轻交错;
-          // 跨系列的实际避让交给 labelLayout.moveOverlap: 'shiftY' 主动纵向推开。
-          position: 'top',
-          distance: 3,
+          // 花费线在 09:00-16:00 长时间保持高位(¥2200~3050),标签若贴在线上方
+          // (position: 'top' distance 3)会跟同一水平高度的相邻标签挤成一团。
+          // 改为放到线下方(distance 8,落入 area 填充区),配白底内边距保证可读;
+          // 这样与命中率标签(贴顶)自然分层,且不再有同高度多标签相撞的问题。
+          position: 'bottom',
+          distance: 8,
           color: COLOR_COST,
           fontSize: 8,
           fontWeight: 'bold',
-          formatter: (p: any) => `¥${Number(p.value).toFixed(2)}`,
+          backgroundColor: 'rgba(255,255,255,0.92)',
+          borderColor: 'rgba(14,165,233,0.25)',
+          borderWidth: 0.5,
+          borderRadius: 2,
+          padding: [1, 3],
+          // 低花费时段(<¥100)放线下会落到图表外,直接隐藏避免裁切
+          formatter: (p: any) => {
+            const v = Number(p.value);
+            if (!Number.isFinite(v) || v < 100) return '';
+            return `¥${v.toFixed(2)}`;
+          },
         },
         labelLayout: { hideOverlap: true, moveOverlap: 'shiftY' },
         areaStyle: {
