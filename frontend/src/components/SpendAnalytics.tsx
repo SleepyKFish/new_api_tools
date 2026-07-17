@@ -2,7 +2,7 @@
  * SpendAnalytics —— 「花费分析（当天 · 按小时）」
  *
  * 一个卡片,上下两个图共用「小时」横坐标(ECharts 双 grid,x 轴 + tooltip 联动):
- * - 上图:每小时总花费折线(¥)
+ * - 上图:每小时总花费折线(¥,左轴) + 每小时缓存命中率折线(%,右轴,虚线)
  * - 下图:每小时 Token 组成堆叠柱(缓存命中 / 缓存写入 / 缓存未命中 / 输出)
  *
  * 数据:dailyTrends —— 当天完整小时缓存与当前小时实时数据的合并结果。
@@ -36,6 +36,7 @@ export interface SpendAnalyticsProps {
 }
 
 const COLOR_COST = '#0ea5e9' // sky —— 花费折线
+const COLOR_HIT_RATE = '#10b981' // emerald —— 缓存命中率折线（右轴）
 const COLOR_HIT = '#6ee7b7' // soft green —— 缓存命中
 const COLOR_WRITE = '#f9a8d4' // soft pink —— 缓存写入
 const COLOR_MISS = '#a5b4fc' // soft indigo —— 缓存未命中
@@ -76,9 +77,11 @@ interface ChartModel {
   write: number[]
   miss: number[]
   out: number[]
+  hitRate: (number | null)[] // 每小时缓存命中率（%），该小时无输入时为 null（折线断开）
   totalCost: number // raw quota
   totalReq: number
   totalTok: number
+  cacheHitRate: number | null // 缓存命中 / 输入 Token（%），无输入时为 null
 }
 
 export function SpendAnalytics({ dailyTrends, loading }: SpendAnalyticsProps) {
@@ -89,6 +92,7 @@ export function SpendAnalytics({ dailyTrends, loading }: SpendAnalyticsProps) {
     const write: number[] = []
     const miss: number[] = []
     const out: number[] = []
+    const hitRate: (number | null)[] = []
     let totalCost = 0
     let totalReq = 0
     for (const d of dailyTrends) {
@@ -106,11 +110,17 @@ export function SpendAnalytics({ dailyTrends, loading }: SpendAnalyticsProps) {
       write.push(w)
       miss.push(m)
       out.push(o)
+      const hourInput = h + w + m
+      hitRate.push(hourInput > 0 ? Number(((h / hourInput) * 100).toFixed(1)) : null)
     }
     const totalTok =
       hit.reduce((s, v) => s + v, 0) + write.reduce((s, v) => s + v, 0) +
       miss.reduce((s, v) => s + v, 0) + out.reduce((s, v) => s + v, 0)
-    return { cats, cost, hit, write, miss, out, totalCost, totalReq, totalTok }
+    const totalHit = hit.reduce((s, v) => s + v, 0)
+    const totalInput =
+      totalHit + write.reduce((s, v) => s + v, 0) + miss.reduce((s, v) => s + v, 0)
+    const cacheHitRate = totalInput > 0 ? (totalHit / totalInput) * 100 : null
+    return { cats, cost, hit, write, miss, out, hitRate, totalCost, totalReq, totalTok, cacheHitRate }
   }, [dailyTrends])
 
   const option = useMemo<EChartsOption>(() => buildOption(model), [model])
@@ -132,6 +142,14 @@ export function SpendAnalytics({ dailyTrends, loading }: SpendAnalyticsProps) {
             <div className="text-2xl font-bold text-primary tabular-nums">{formatCostPrecise(model.totalCost)}</div>
             <div className="text-xs text-muted-foreground tabular-nums">
               {model.totalReq.toLocaleString()} 请求 · {formatTokens(model.totalTok)} Token
+              {model.cacheHitRate !== null && (
+                <>
+                  {' · 缓存命中 '}
+                  <span className="text-emerald-600 dark:text-emerald-400 font-medium">
+                    {model.cacheHitRate.toFixed(1)}%
+                  </span>
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -174,8 +192,8 @@ function buildOption(m: ChartModel): EChartsOption {
   return {
     animationDuration: 400,
     grid: [
-      { left: 72, right: 24, top: 32, height: 162 },
-      { left: 72, right: 24, top: 262, height: 162 },
+      { left: 72, right: 56, top: 32, height: 162 },
+      { left: 72, right: 56, top: 262, height: 162 },
     ],
     axisPointer: {
       link: [{ xAxisIndex: 'all' }],
@@ -203,12 +221,19 @@ function buildOption(m: ChartModel): EChartsOption {
         const miss = m.miss[idx] ?? 0
         const out = m.out[idx] ?? 0
         const tot = hit + write + miss + out
+        const rate = m.hitRate[idx]
         const pct = (v: number) => (tot > 0 ? formatSignificant((v / tot) * 100) : '0')
         return [
           `<div style="display:flex;align-items:center;justify-content:space-between;gap:24px;margin-bottom:7px">` +
           `<strong style="font-size:13px;color:#334155">${hour}</strong>` +
           `<span style="display:flex;align-items:baseline;gap:6px"><span style="color:#94a3b8;font-size:11px">花费</span>` +
           `<strong style="color:${COLOR_COST};font-variant-numeric:tabular-nums">¥${cost.toFixed(2)}</strong></span></div>`,
+          rate !== null && rate !== undefined
+            ? `<div style="display:flex;align-items:center;justify-content:space-between;gap:24px;margin-bottom:7px">` +
+              `<span style="display:flex;align-items:center;gap:6px">${dot(COLOR_HIT_RATE)}` +
+              `<span style="color:#94a3b8;font-size:11px">缓存命中率</span></span>` +
+              `<strong style="color:${COLOR_HIT_RATE};font-variant-numeric:tabular-nums">${rate.toFixed(1)}%</strong></div>`
+            : '',
           `<div style="border-top:1px solid rgba(148,163,184,0.20);padding-top:5px">`,
           tooltipRow(COLOR_HIT, '缓存命中', formatTooltipTokens(hit), `${pct(hit)}%`),
           tooltipRow(COLOR_WRITE, '缓存写入', formatTooltipTokens(write), `${pct(write)}%`),
@@ -223,7 +248,7 @@ function buildOption(m: ChartModel): EChartsOption {
     },
     legend: [
       {
-        data: ['花费'],
+        data: ['花费', '缓存命中率'],
         left: 72,
         top: 2,
         itemWidth: 14,
@@ -264,12 +289,9 @@ function buildOption(m: ChartModel): EChartsOption {
       {
         type: 'value',
         gridIndex: 0,
-        name: '花费 (¥)',
-        nameLocation: 'middle',
-        nameRotate: 90,
-        nameGap: 52,
-        nameTextStyle: { color: labelColor, fontSize: 10 },
+        // 刻度已带 ¥ 前缀，不再重复轴标题；tooltip 已有精确值，隐藏指针数值标签
         axisLabel: { color: labelColor, fontSize: 10, formatter: (v: number) => `¥${v}` },
+        axisPointer: { label: { show: false } },
         splitLine,
       },
       {
@@ -281,8 +303,20 @@ function buildOption(m: ChartModel): EChartsOption {
         nameGap: 52,
         nameTextStyle: { color: labelColor, fontSize: 10 },
         axisLabel: { color: labelColor, fontSize: 10, formatter: (v: number) => formatTokens(v) },
+        axisPointer: { label: { show: false } },
         max: ({ max }: { max: number }) => (max > 0 ? max * TOKEN_AXIS_HEADROOM : 1),
         splitLine,
+      },
+      {
+        // 右轴：缓存命中率（%），固定 0-100，不画网格线避免与花费轴网格混淆
+        type: 'value',
+        gridIndex: 0,
+        position: 'right',
+        min: 0,
+        max: 100,
+        axisLabel: { color: COLOR_HIT_RATE, fontSize: 10, formatter: '{value}%' },
+        axisPointer: { label: { show: false } },
+        splitLine: { show: false },
       },
     ],
     series: [
@@ -320,6 +354,32 @@ function buildOption(m: ChartModel): EChartsOption {
             ],
           },
         },
+      },
+      {
+        // 缓存命中率（右轴 %）：虚线区分于花费实线；无输入的小时为 null，折线断开
+        name: '缓存命中率',
+        type: 'line',
+        xAxisIndex: 0,
+        yAxisIndex: 2,
+        data: m.hitRate,
+        smooth: true,
+        showSymbol: true,
+        symbol: 'circle',
+        symbolSize: 4,
+        connectNulls: false,
+        lineStyle: { width: 2, color: COLOR_HIT_RATE, type: 'dashed' },
+        itemStyle: { color: COLOR_HIT_RATE },
+        label: {
+          show: true,
+          position: 'bottom',
+          color: COLOR_HIT_RATE,
+          fontSize: 9,
+          fontWeight: 'bold',
+          formatter: (p: any) =>
+            p.value === null || p.value === undefined ? '' : `${Number(p.value).toFixed(1)}%`,
+        },
+        labelLayout: { hideOverlap: true },
+        z: 5,
       },
       {
         name: '缓存命中', type: 'bar', stack: 'tok', xAxisIndex: 1, yAxisIndex: 1, data: m.hit,
