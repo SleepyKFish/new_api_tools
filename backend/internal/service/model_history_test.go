@@ -358,7 +358,7 @@ func TestModelHistoryChannelModelDetailNotBuilt(t *testing.T) {
 	}
 }
 
-func TestModelHistoryDailyTrendAggregationAndQuotaBackfillState(t *testing.T) {
+func TestModelHistoryDailyTrendAggregationAndBackfillState(t *testing.T) {
 	dir := t.TempDir()
 	os.Setenv("DATA_DIR", dir)
 	os.Setenv("SQL_DSN", "user:pass@tcp(localhost:3306)/db")
@@ -456,18 +456,8 @@ func TestModelHistoryDailyTrendAggregationAndQuotaBackfillState(t *testing.T) {
 		t.Fatalf("unique user total wrong: %v", completedRow)
 	}
 
-	dates, err := hist.ListDatesMissingQuota()
-	if err != nil {
-		t.Fatalf("ListDatesMissingQuota failed: %v", err)
-	}
-	if len(dates) != 1 || dates[0] != missingQuotaDate {
-		t.Fatalf("missing quota dates=%v, want one deduplicated date %s", dates, missingQuotaDate)
-	}
-	if err := hist.MarkQuotaBackfillDateComplete(missingQuotaDate); err != nil {
-		t.Fatalf("MarkQuotaBackfillDateComplete failed: %v", err)
-	}
-	if dates, err = hist.ListDatesMissingQuota(); err != nil || len(dates) != 0 {
-		t.Fatalf("completed zero-quota date should not be retried: dates=%v err=%v", dates, err)
+	if has, err := hist.HasDailyTotals(completedDate); err != nil || !has {
+		t.Fatalf("current snapshot must have daily totals: has=%v err=%v", has, err)
 	}
 
 	if _, err := hist.db.Exec(`DELETE FROM model_daily_totals WHERE date = ?`, completedDate); err != nil {
@@ -476,23 +466,31 @@ func TestModelHistoryDailyTrendAggregationAndQuotaBackfillState(t *testing.T) {
 	if has, err := hist.HasDate(completedDate); err != nil || !has {
 		t.Fatalf("legacy summary must remain visible: has=%v err=%v", has, err)
 	}
-	if dates, err = hist.ListDatesMissingQuota(); err != nil || len(dates) != 1 || dates[0] != completedDate {
-		t.Fatalf("legacy date without global totals must be migrated: dates=%v err=%v", dates, err)
-	}
-	if err := hist.MarkQuotaBackfillDateComplete(completedDate); err != nil {
-		t.Fatalf("mark legacy date complete failed: %v", err)
+	if has, err := hist.HasDailyTotals(completedDate); err != nil || has {
+		t.Fatalf("legacy summary must be incomplete for catch-up: has=%v err=%v", has, err)
 	}
 
-	complete, err := hist.IsQuotaBackfillComplete()
+	complete, err := hist.IsFullHistoryBackfillComplete()
 	if err != nil || complete {
-		t.Fatalf("initial quota backfill state=%v err=%v, want incomplete", complete, err)
+		t.Fatalf("initial full backfill state=%v err=%v, want incomplete", complete, err)
 	}
-	if err := hist.MarkQuotaBackfillComplete(); err != nil {
-		t.Fatalf("MarkQuotaBackfillComplete failed: %v", err)
+	dateComplete, err := hist.IsFullHistoryBackfillDateComplete(missingQuotaDate)
+	if err != nil || dateComplete {
+		t.Fatalf("initial date backfill state=%v err=%v, want incomplete", dateComplete, err)
 	}
-	complete, err = hist.IsQuotaBackfillComplete()
+	if err := hist.MarkFullHistoryBackfillDateComplete(missingQuotaDate); err != nil {
+		t.Fatalf("MarkFullHistoryBackfillDateComplete failed: %v", err)
+	}
+	dateComplete, err = hist.IsFullHistoryBackfillDateComplete(missingQuotaDate)
+	if err != nil || !dateComplete {
+		t.Fatalf("date backfill state=%v err=%v, want complete", dateComplete, err)
+	}
+	if err := hist.MarkFullHistoryBackfillComplete(); err != nil {
+		t.Fatalf("MarkFullHistoryBackfillComplete failed: %v", err)
+	}
+	complete, err = hist.IsFullHistoryBackfillComplete()
 	if err != nil || !complete {
-		t.Fatalf("quota backfill state=%v err=%v, want complete", complete, err)
+		t.Fatalf("full backfill state=%v err=%v, want complete", complete, err)
 	}
 }
 

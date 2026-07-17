@@ -2418,6 +2418,25 @@ func (s *ModelStatusService) GetEmbedConfig() map[string]interface{} {
 	return config
 }
 
+// OldestPerformanceLogDate returns the local calendar date of the oldest log
+// that participates in model-history aggregation.
+func (s *ModelStatusService) OldestPerformanceLogDate() (time.Time, bool, error) {
+	row, err := s.db.QueryOneWithTimeout(30*time.Second,
+		`SELECT MIN(created_at) AS min_created_at FROM logs WHERE type IN (2, 5)`)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	if row == nil {
+		return time.Time{}, false, nil
+	}
+	createdAt := toInt64(row["min_created_at"])
+	if createdAt <= 0 {
+		return time.Time{}, false, nil
+	}
+	t := time.Unix(createdAt, 0).In(time.Local)
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.Local), true, nil
+}
+
 // AggregateDay scans the main logs table for the given local-day window
 // [date 00:00, next day 00:00) once, building per-model availability slots +
 // performance accumulators and per-channel performance accumulators, then

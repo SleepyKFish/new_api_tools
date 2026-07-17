@@ -392,6 +392,21 @@ func (s *ModelHistoryService) HasDate(date string) (bool, error) {
 	return true, nil
 }
 
+// HasDailyTotals reports whether the date was built by the current snapshot
+// schema, including dates with no matching model rows.
+func (s *ModelHistoryService) HasDailyTotals(date string) (bool, error) {
+	row := s.db.QueryRow(`SELECT 1 FROM model_daily_totals WHERE date = ? LIMIT 1`, date)
+	var x int
+	err := row.Scan(&x)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // ListAvailableDates returns distinct dates that have stored data, newest first.
 func (s *ModelHistoryService) ListAvailableDates() ([]string, error) {
 	rows, err := s.db.Query(`SELECT DISTINCT date FROM model_daily_summary ORDER BY date DESC`)
@@ -410,47 +425,14 @@ func (s *ModelHistoryService) ListAvailableDates() ([]string, error) {
 	return dates, rows.Err()
 }
 
-// ListDatesMissingQuota returns dates that need the one-time trend migration:
-// either their global daily totals are absent or their quota sum predates the
-// quota column. Results are deduplicated by date.
-func (s *ModelHistoryService) ListDatesMissingQuota() ([]string, error) {
-	today := time.Now().Format("2006-01-02")
-	rows, err := s.db.Query(
-		`SELECT summary.date FROM model_daily_summary summary
-		 LEFT JOIN model_daily_totals totals ON totals.date = summary.date
-		 WHERE summary.date < ? AND NOT EXISTS (
-			 SELECT 1 FROM model_history_metadata metadata
-			 WHERE metadata.key = ? || summary.date
-		 )
-		 GROUP BY summary.date
-		 HAVING MAX(totals.date) IS NULL
-			 OR (SUM(summary.total_requests) > 0 AND SUM(summary.quota_sum) = 0)
-		 ORDER BY summary.date DESC`, today, quotaBackfillDateKeyPrefix)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	dates := make([]string, 0)
-	for rows.Next() {
-		var d string
-		if err := rows.Scan(&d); err != nil {
-			return nil, err
-		}
-		dates = append(dates, d)
-	}
-	return dates, rows.Err()
-}
-
 const (
-	quotaBackfillMetadataKey   = "quota_sum_backfill_v1"
-	quotaBackfillDateKeyPrefix = quotaBackfillMetadataKey + ":"
+	fullHistoryBackfillMetadataKey   = "full_history_backfill_v2"
+	fullHistoryBackfillDateKeyPrefix = fullHistoryBackfillMetadataKey + ":"
 )
 
-// IsQuotaBackfillComplete reports whether the one-time migration for rows
-// created before quota_sum was populated has finished on this installation.
-func (s *ModelHistoryService) IsQuotaBackfillComplete() (bool, error) {
+func (s *ModelHistoryService) hasMetadata(key string) (bool, error) {
 	var value string
-	err := s.db.QueryRow(`SELECT value FROM model_history_metadata WHERE key = ?`, quotaBackfillMetadataKey).Scan(&value)
+	err := s.db.QueryRow(`SELECT value FROM model_history_metadata WHERE key = ?`, key).Scan(&value)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -460,20 +442,29 @@ func (s *ModelHistoryService) IsQuotaBackfillComplete() (bool, error) {
 	return true, nil
 }
 
-// MarkQuotaBackfillComplete prevents legitimate zero-quota history from being
-// re-scanned on every server restart.
-func (s *ModelHistoryService) MarkQuotaBackfillComplete() error {
+func (s *ModelHistoryService) markMetadata(key string) error {
 	_, err := s.db.Exec(`INSERT OR REPLACE INTO model_history_metadata (key, value) VALUES (?, ?)`,
-		quotaBackfillMetadataKey, time.Now().UTC().Format(time.RFC3339))
+		key, time.Now().UTC().Format(time.RFC3339))
 	return err
 }
 
-// MarkQuotaBackfillDateComplete records successful zero-quota dates so an
-// interrupted migration does not repeat their full source-log scan.
-func (s *ModelHistoryService) MarkQuotaBackfillDateComplete(date string) error {
-	_, err := s.db.Exec(`INSERT OR REPLACE INTO model_history_metadata (key, value) VALUES (?, ?)`,
-		quotaBackfillDateKeyPrefix+date, time.Now().UTC().Format(time.RFC3339))
-	return err
+// IsFullHistoryBackfillComplete reports whether every completed source-log
+// date has been rebuilt at least once by the v2 full-history task.
+func (s *ModelHistoryService) IsFullHistoryBackfillComplete() (bool, error) {
+	return s.hasMetadata(fullHistoryBackfillMetadataKey)
+}
+
+// IsFullHistoryBackfillDateComplete supports day-level resume after shutdown.
+func (s *ModelHistoryService) IsFullHistoryBackfillDateComplete(date string) (bool, error) {
+	return s.hasMetadata(fullHistoryBackfillDateKeyPrefix + date)
+}
+
+func (s *ModelHistoryService) MarkFullHistoryBackfillComplete() error {
+	return s.markMetadata(fullHistoryBackfillMetadataKey)
+}
+
+func (s *ModelHistoryService) MarkFullHistoryBackfillDateComplete(date string) error {
+	return s.markMetadata(fullHistoryBackfillDateKeyPrefix + date)
 }
 
 // daySnapshot bundles everything aggregated for a single day before it is
