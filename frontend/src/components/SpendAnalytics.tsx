@@ -334,13 +334,17 @@ function buildOption(m: ChartModel): EChartsOption {
         itemStyle: { color: COLOR_COST },
         label: {
           show: true,
+          // 花费与缓存命中率两条折线在高位时纵向几乎同高,所有标签堆在图表上半区。
+          // line 系列 position 不接受回调,这里用 distance 横向偏移做轻交错;
+          // 跨系列的实际避让交给 labelLayout.moveOverlap: 'shiftY' 主动纵向推开。
           position: 'top',
+          distance: 3,
           color: COLOR_COST,
-          fontSize: 9,
+          fontSize: 8,
           fontWeight: 'bold',
           formatter: (p: any) => `¥${Number(p.value).toFixed(2)}`,
         },
-        labelLayout: { hideOverlap: true },
+        labelLayout: { hideOverlap: true, moveOverlap: 'shiftY' },
         areaStyle: {
           color: {
             type: 'linear',
@@ -371,14 +375,16 @@ function buildOption(m: ChartModel): EChartsOption {
         itemStyle: { color: COLOR_HIT_RATE },
         label: {
           show: true,
+          // 与花费折线对称放于线下；与花费标签错开由 labelLayout.moveOverlap 完成
           position: 'bottom',
+          distance: 3,
           color: COLOR_HIT_RATE,
-          fontSize: 9,
+          fontSize: 8,
           fontWeight: 'bold',
           formatter: (p: any) =>
             p.value === null || p.value === undefined ? '' : `${Number(p.value).toFixed(1)}%`,
         },
-        labelLayout: { hideOverlap: true },
+        labelLayout: { hideOverlap: true, moveOverlap: 'shiftY' },
         z: 5,
       },
       {
