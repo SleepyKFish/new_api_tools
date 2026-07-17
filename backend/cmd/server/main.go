@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -269,10 +270,15 @@ func backgroundModelHistory(stop <-chan struct{}) {
 	yesterday := time.Now().In(time.Local).AddDate(0, 0, -1).Format("2006-01-02")
 	if has, err := hist.HasDate(yesterday); err == nil && !has {
 		logger.L.System("[模型历史] 启动补算昨天数据: " + yesterday)
-		aggregateModelHistoryDay(yesterday)
+		_ = aggregateModelHistoryDay(yesterday)
 	} else if err != nil {
 		logger.L.Warn("[模型历史] 检查昨天数据失败: " + err.Error())
 	}
+
+	// Startup sweep: slowly re-aggregate older dates whose quota_sum is still
+	// zero (e.g. rows written before the quota column was added). This runs in
+	// the background so it doesn't block server startup or the daily 01:00 job.
+	go backfillMissingQuotaHistory(hist, stop)
 
 	logger.L.System("[模型历史] 定时统计任务已启动 (每天 01:00 统计前一天)")
 
@@ -289,7 +295,7 @@ func backgroundModelHistory(stop <-chan struct{}) {
 		case <-time.After(wait):
 			day := time.Now().In(time.Local).AddDate(0, 0, -1).Format("2006-01-02")
 			logger.L.System("[模型历史] 开始统计前一天数据: " + day)
-			aggregateModelHistoryDay(day)
+			_ = aggregateModelHistoryDay(day)
 		case <-stop:
 			logger.L.System("[模型历史] 定时统计任务已停止")
 			return
@@ -297,16 +303,93 @@ func backgroundModelHistory(stop <-chan struct{}) {
 	}
 }
 
-func aggregateModelHistoryDay(date string) {
+var modelHistoryAggregationMu sync.Mutex
+
+func aggregateModelHistoryDay(date string) (err error) {
+	modelHistoryAggregationMu.Lock()
+	defer modelHistoryAggregationMu.Unlock()
 	defer func() {
 		if r := recover(); r != nil {
 			logger.L.Error(fmt.Sprintf("[模型历史] 统计 %s panic: %v", date, r))
+			err = fmt.Errorf("aggregate model history %s panic: %v", date, r)
 		}
 	}()
 	svc := service.NewModelStatusService()
-	if err := svc.AggregateDay(date); err != nil {
-		logger.L.Warn(fmt.Sprintf("[模型历史] 统计 %s 失败: %s", date, err.Error()))
-		return
+	if aggregateErr := svc.AggregateDay(date); aggregateErr != nil {
+		logger.L.Warn(fmt.Sprintf("[模型历史] 统计 %s 失败: %s", date, aggregateErr.Error()))
+		return aggregateErr
 	}
 	logger.L.Success("[模型历史] 统计完成: " + date)
+	return nil
+}
+
+// backfillMissingQuotaHistory sweeps older dates in model_daily_summary that
+// were aggregated before the quota_sum column existed (total_requests > 0 but
+// quota_sum == 0). It re-aggregates them one by one with a 2.5 min gap so it
+// does not overload the DB. Runs once at startup in a background goroutine.
+func backfillMissingQuotaHistory(hist *service.ModelHistoryService, stop <-chan struct{}) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.L.Error(fmt.Sprintf("[模型历史] 回填quota panic: %v", r))
+		}
+	}()
+
+	complete, err := hist.IsQuotaBackfillComplete()
+	if err != nil {
+		logger.L.Warn("[模型历史] 检查quota回填状态失败: " + err.Error())
+		return
+	}
+	if complete {
+		logger.L.System("[模型历史] quota_sum 历史回填已完成")
+		return
+	}
+
+	dates, err := hist.ListDatesMissingQuota()
+	if err != nil {
+		logger.L.Warn("[模型历史] 查询缺失quota日期失败: " + err.Error())
+		return
+	}
+	if len(dates) == 0 {
+		if err := hist.MarkQuotaBackfillComplete(); err != nil {
+			logger.L.Warn("[模型历史] 标记quota回填完成失败: " + err.Error())
+			return
+		}
+		logger.L.System("[模型历史] 所有历史日期的 quota_sum 已完整，无需回填")
+		return
+	}
+
+	logger.L.System(fmt.Sprintf("[模型历史] 共 %d 天历史数据缺失 quota_sum，开始逐步回填(间隔2.5min)", len(dates)))
+	const interval = 2*time.Minute + 30*time.Second
+
+	for i, date := range dates {
+		select {
+		case <-stop:
+			logger.L.System("[模型历史] 回填quota任务收到停止信号，已中断")
+			return
+		default:
+		}
+
+		logger.L.System(fmt.Sprintf("[模型历史] [%d/%d] 回填quota: %s", i+1, len(dates), date))
+		if err := aggregateModelHistoryDay(date); err != nil {
+			logger.L.Warn(fmt.Sprintf("[模型历史] 回填quota失败，将在下次启动重试: %s", date))
+			return
+		}
+		if err := hist.MarkQuotaBackfillDateComplete(date); err != nil {
+			logger.L.Warn(fmt.Sprintf("[模型历史] 记录quota回填日期失败 %s: %s", date, err.Error()))
+			return
+		}
+
+		if i < len(dates)-1 {
+			select {
+			case <-stop:
+				return
+			case <-time.After(interval):
+			}
+		}
+	}
+	if err := hist.MarkQuotaBackfillComplete(); err != nil {
+		logger.L.Warn("[模型历史] 标记quota回填完成失败: " + err.Error())
+		return
+	}
+	logger.L.Success("[模型历史] 全部历史 quota_sum 回填完成")
 }

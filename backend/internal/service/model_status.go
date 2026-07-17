@@ -1060,6 +1060,7 @@ func performanceLogBaseColumns() []string {
 	return []string{
 		"id",
 		"created_at",
+		"user_id",
 		"model_name",
 		"channel_id",
 		"type",
@@ -2440,6 +2441,7 @@ func (s *ModelStatusService) AggregateDay(date string) error {
 	snap := &daySnapshot{
 		date:          date,
 		startTS:       startTime,
+		uniqueUsers:   make(map[int64]struct{}),
 		models:        make(map[string]*dailyPerfStats),
 		slots:         make(map[string]map[int]*slotCounts),
 		channels:      make(map[int64]*dailyPerfStats),
@@ -2493,6 +2495,11 @@ func (s *ModelStatusService) accumulateDayRow(snap *daySnapshot, row map[string]
 	m := computeRowMetrics(row, rules)
 	if !m.valid {
 		return
+	}
+	if m.isPerf {
+		if userID, ok := row["user_id"]; ok && userID != nil {
+			snap.uniqueUsers[toInt64(userID)] = struct{}{}
+		}
 	}
 	modelName := toString(row["model_name"])
 	channelID := toInt64(row["channel_id"])

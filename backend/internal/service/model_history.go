@@ -138,6 +138,11 @@ func (s *ModelHistoryService) ensureSchema() error {
 			start_time INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (date, model_name)
 		)`,
+		`CREATE TABLE IF NOT EXISTS model_daily_totals (
+			date TEXT PRIMARY KEY,
+			unique_users INTEGER NOT NULL DEFAULT 0,
+			completed_at INTEGER NOT NULL DEFAULT 0
+		)`,
 		`CREATE TABLE IF NOT EXISTS model_hourly_slot (
 			date TEXT NOT NULL,
 			model_name TEXT NOT NULL,
@@ -284,6 +289,10 @@ func (s *ModelHistoryService) ensureSchema() error {
 			use_time_sum REAL NOT NULL DEFAULT 0,
 			PRIMARY KEY (date, channel_id, model_name, slot_idx)
 		)`,
+		`CREATE TABLE IF NOT EXISTS model_history_metadata (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL DEFAULT ''
+		)`,
 		`CREATE INDEX IF NOT EXISTS idx_daily_summary_date ON model_daily_summary(date)`,
 		`CREATE INDEX IF NOT EXISTS idx_hourly_slot_date_model ON model_hourly_slot(date, model_name)`,
 		`CREATE INDEX IF NOT EXISTS idx_daily_channel_date ON model_daily_channel(date)`,
@@ -369,7 +378,9 @@ func (s *ModelHistoryService) Close() error {
 
 // HasDate reports whether any summary rows exist for the given date.
 func (s *ModelHistoryService) HasDate(date string) (bool, error) {
-	row := s.db.QueryRow(`SELECT 1 FROM model_daily_summary WHERE date = ? LIMIT 1`, date)
+	row := s.db.QueryRow(`SELECT 1 WHERE
+		EXISTS (SELECT 1 FROM model_daily_totals WHERE date = ?)
+		OR EXISTS (SELECT 1 FROM model_daily_summary WHERE date = ?)`, date, date)
 	var x int
 	err := row.Scan(&x)
 	if err == sql.ErrNoRows {
@@ -399,18 +410,85 @@ func (s *ModelHistoryService) ListAvailableDates() ([]string, error) {
 	return dates, rows.Err()
 }
 
+// ListDatesMissingQuota returns dates that need the one-time trend migration:
+// either their global daily totals are absent or their quota sum predates the
+// quota column. Results are deduplicated by date.
+func (s *ModelHistoryService) ListDatesMissingQuota() ([]string, error) {
+	today := time.Now().Format("2006-01-02")
+	rows, err := s.db.Query(
+		`SELECT summary.date FROM model_daily_summary summary
+		 LEFT JOIN model_daily_totals totals ON totals.date = summary.date
+		 WHERE summary.date < ? AND NOT EXISTS (
+			 SELECT 1 FROM model_history_metadata metadata
+			 WHERE metadata.key = ? || summary.date
+		 )
+		 GROUP BY summary.date
+		 HAVING MAX(totals.date) IS NULL
+			 OR (SUM(summary.total_requests) > 0 AND SUM(summary.quota_sum) = 0)
+		 ORDER BY summary.date DESC`, today, quotaBackfillDateKeyPrefix)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	dates := make([]string, 0)
+	for rows.Next() {
+		var d string
+		if err := rows.Scan(&d); err != nil {
+			return nil, err
+		}
+		dates = append(dates, d)
+	}
+	return dates, rows.Err()
+}
+
+const (
+	quotaBackfillMetadataKey   = "quota_sum_backfill_v1"
+	quotaBackfillDateKeyPrefix = quotaBackfillMetadataKey + ":"
+)
+
+// IsQuotaBackfillComplete reports whether the one-time migration for rows
+// created before quota_sum was populated has finished on this installation.
+func (s *ModelHistoryService) IsQuotaBackfillComplete() (bool, error) {
+	var value string
+	err := s.db.QueryRow(`SELECT value FROM model_history_metadata WHERE key = ?`, quotaBackfillMetadataKey).Scan(&value)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// MarkQuotaBackfillComplete prevents legitimate zero-quota history from being
+// re-scanned on every server restart.
+func (s *ModelHistoryService) MarkQuotaBackfillComplete() error {
+	_, err := s.db.Exec(`INSERT OR REPLACE INTO model_history_metadata (key, value) VALUES (?, ?)`,
+		quotaBackfillMetadataKey, time.Now().UTC().Format(time.RFC3339))
+	return err
+}
+
+// MarkQuotaBackfillDateComplete records successful zero-quota dates so an
+// interrupted migration does not repeat their full source-log scan.
+func (s *ModelHistoryService) MarkQuotaBackfillDateComplete(date string) error {
+	_, err := s.db.Exec(`INSERT OR REPLACE INTO model_history_metadata (key, value) VALUES (?, ?)`,
+		quotaBackfillDateKeyPrefix+date, time.Now().UTC().Format(time.RFC3339))
+	return err
+}
+
 // daySnapshot bundles everything aggregated for a single day before it is
 // written transactionally.
 type daySnapshot struct {
-	date            string
-	startTS         int64
-	models          map[string]*dailyPerfStats
-	slots           map[string]map[int]*slotCounts // model -> slotIdx -> counts
-	channels        map[int64]*dailyPerfStats
-	chanSlot        map[int64]map[int]*slotCounts // channel -> slotIdx -> counts
-	chanName        map[int64]string
-	channelModels   map[int64]map[string]*dailyPerfStats
-	chanModelSlot   map[int64]map[string]map[int]*slotCounts
+	date          string
+	startTS       int64
+	uniqueUsers   map[int64]struct{}
+	models        map[string]*dailyPerfStats
+	slots         map[string]map[int]*slotCounts // model -> slotIdx -> counts
+	channels      map[int64]*dailyPerfStats
+	chanSlot      map[int64]map[int]*slotCounts // channel -> slotIdx -> counts
+	chanName      map[int64]string
+	channelModels map[int64]map[string]*dailyPerfStats
+	chanModelSlot map[int64]map[string]map[int]*slotCounts
 }
 
 type slotCounts struct {
@@ -449,10 +527,14 @@ func (s *ModelHistoryService) SaveDay(snap *daySnapshot) error {
 	}
 	defer tx.Rollback()
 
-	for _, table := range []string{"model_daily_summary", "model_hourly_slot", "model_daily_channel", "channel_hourly_slot", "model_daily_channel_model", "channel_model_hourly_slot"} {
+	for _, table := range []string{"model_daily_summary", "model_daily_totals", "model_hourly_slot", "model_daily_channel", "channel_hourly_slot", "model_daily_channel_model", "channel_model_hourly_slot"} {
 		if _, err := tx.Exec(fmt.Sprintf("DELETE FROM %s WHERE date = ?", table), snap.date); err != nil {
 			return err
 		}
+	}
+	if _, err := tx.Exec(`INSERT INTO model_daily_totals (date, unique_users, completed_at) VALUES (?, ?, ?)`,
+		snap.date, len(snap.uniqueUsers), time.Now().Unix()); err != nil {
+		return err
 	}
 
 	summaryStmt, err := tx.Prepare(`INSERT INTO model_daily_summary (
@@ -1339,4 +1421,77 @@ func (s *ModelHistoryService) buildChannelCostTrends(
 		return sumI > sumJ
 	})
 	return channels
+}
+
+// QueryDailyAggregatedTrends returns daily trends (aggregated across all models)
+// from model_daily_summary, matching the same output format as dashboard's
+// queryDailyTrends (day_group key for fillDailyGaps compatibility).
+//
+// This avoids scanning the main logs/quota_data tables for the 28-day weekly
+// pattern view, which is a heavy real-time aggregation. The model_history.db
+// already pre-aggregates per-model-per-day data daily at 01:00 local time.
+//
+// Only completed days are returned; callers merge today's live aggregate and
+// fall back to source logs unless every requested completed day is present.
+func (s *ModelHistoryService) QueryDailyAggregatedTrends(days int, tzOffset int64) ([]map[string]interface{}, error) {
+	cutoff := time.Now().AddDate(0, 0, -days+1).Format("2006-01-02")
+	today := time.Now().Format("2006-01-02")
+
+	query := `SELECT totals.date,
+			COALESCE(SUM(summary.total_requests - summary.failure_count), 0) as request_count,
+			COALESCE(SUM(summary.quota_sum), 0) as quota_used,
+			totals.unique_users,
+			COALESCE(SUM(summary.input_tokens_sum), 0) as prompt_tokens,
+			COALESCE(SUM(summary.completion_tokens_sum), 0) as completion_tokens,
+			COALESCE(SUM(summary.cache_tokens_sum), 0) as cache_hit_tokens,
+			COALESCE(SUM(summary.cache_write_tokens_sum), 0) as cache_write_tokens
+		FROM model_daily_totals totals
+		LEFT JOIN model_daily_summary summary ON summary.date = totals.date
+		WHERE totals.date >= ? AND totals.date < ?
+		GROUP BY totals.date, totals.unique_users
+		ORDER BY totals.date ASC`
+
+	rows, err := s.db.Query(query, cutoff, today)
+	if err != nil {
+		return nil, fmt.Errorf("query model_daily_summary trends: %w", err)
+	}
+	defer rows.Close()
+
+	loc := time.Now().Location()
+	result := make([]map[string]interface{}, 0, days)
+
+	for rows.Next() {
+		var dateStr string
+		var requestCount, quotaUsed, promptTokens, completionTokens, cacheHitTokens, cacheWriteTokens float64
+		var uniqueUsers int64
+		if err := rows.Scan(&dateStr, &requestCount, &quotaUsed, &uniqueUsers, &promptTokens,
+			&completionTokens, &cacheHitTokens, &cacheWriteTokens); err != nil {
+			return nil, fmt.Errorf("scan model_daily_summary row: %w", err)
+		}
+
+		// Compute day_group compatible with fillDailyGaps:
+		//   dayStart := time.Date(year, month, day, 0,0,0,0, loc)
+		//   day_group = (dayStart.Unix() + tzOffset) / 86400
+		t, err := time.ParseInLocation("2006-01-02", dateStr, loc)
+		if err != nil {
+			continue // skip unparseable dates
+		}
+		dayGroup := (t.Unix() + tzOffset) / 86400
+
+		result = append(result, map[string]interface{}{
+			"day_group":          dayGroup,
+			"request_count":      int64(requestCount),
+			"quota_used":         quotaUsed,
+			"unique_users":       uniqueUsers,
+			"prompt_tokens":      int64(promptTokens),
+			"completion_tokens":  int64(completionTokens),
+			"cache_hit_tokens":   int64(cacheHitTokens),
+			"cache_write_tokens": int64(cacheWriteTokens),
+		})
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate model_daily_summary rows: %w", err)
+	}
+	return result, nil
 }

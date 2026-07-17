@@ -5,6 +5,7 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/new-api-tools/backend/internal/config"
 )
@@ -354,6 +355,144 @@ func TestModelHistoryChannelModelDetailNotBuilt(t *testing.T) {
 	}
 	if _, err := hist.GetChannelModelPerformanceByDate(date, 7, 100, 0); !errors.Is(err, ErrHistoryChannelModelDetailNotBuilt) {
 		t.Fatalf("expected ErrHistoryChannelModelDetailNotBuilt, got %v", err)
+	}
+}
+
+func TestModelHistoryDailyTrendAggregationAndQuotaBackfillState(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("DATA_DIR", dir)
+	os.Setenv("SQL_DSN", "user:pass@tcp(localhost:3306)/db")
+	defer os.Unsetenv("DATA_DIR")
+	defer os.Unsetenv("SQL_DSN")
+	config.Load()
+	resetHistorySingleton()
+
+	hist, err := GetModelHistoryService()
+	if err != nil {
+		t.Fatalf("GetModelHistoryService failed: %v", err)
+	}
+	defer func() {
+		hist.Close()
+		resetHistorySingleton()
+	}()
+
+	now := time.Now()
+	completedDate := now.AddDate(0, 0, -2).Format("2006-01-02")
+	missingQuotaDate := now.AddDate(0, 0, -3).Format("2006-01-02")
+	today := now.Format("2006-01-02")
+
+	completed := &daySnapshot{
+		date:        completedDate,
+		startTS:     dayStartTimestamp(completedDate),
+		uniqueUsers: map[int64]struct{}{1: {}, 2: {}, 3: {}},
+		models: map[string]*dailyPerfStats{
+			"gpt-4": {
+				totalRequests:       3,
+				failureCount:        1,
+				quotaSum:            12,
+				inputTokensSum:      100,
+				completionTokensSum: 40,
+				cacheTokensSum:      20,
+			},
+			"claude": {
+				totalRequests:       2,
+				quotaSum:            8,
+				inputTokensSum:      70,
+				completionTokensSum: 30,
+				cacheWriteTokensSum: 10,
+			},
+		},
+	}
+	if err := hist.SaveDay(completed); err != nil {
+		t.Fatalf("SaveDay completed failed: %v", err)
+	}
+
+	missingQuota := &daySnapshot{
+		date:    missingQuotaDate,
+		startTS: dayStartTimestamp(missingQuotaDate),
+		models: map[string]*dailyPerfStats{
+			"gpt-4":  {totalRequests: 4},
+			"claude": {totalRequests: 6},
+		},
+	}
+	if err := hist.SaveDay(missingQuota); err != nil {
+		t.Fatalf("SaveDay missing quota failed: %v", err)
+	}
+
+	todaySnapshot := &daySnapshot{
+		date:        today,
+		startTS:     dayStartTimestamp(today),
+		uniqueUsers: map[int64]struct{}{99: {}},
+		models: map[string]*dailyPerfStats{
+			"gpt-4": {totalRequests: 99, quotaSum: 99},
+		},
+	}
+	if err := hist.SaveDay(todaySnapshot); err != nil {
+		t.Fatalf("SaveDay today failed: %v", err)
+	}
+
+	_, offset := now.Zone()
+	rows, err := hist.QueryDailyAggregatedTrends(7, int64(offset))
+	if err != nil {
+		t.Fatalf("QueryDailyAggregatedTrends failed: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("completed trend rows=%d, want 2 (today must be excluded): %v", len(rows), rows)
+	}
+	var completedRow map[string]interface{}
+	for _, row := range rows {
+		if toInt64(row["request_count"]) == 4 {
+			completedRow = row
+			break
+		}
+	}
+	if completedRow == nil {
+		t.Fatalf("cross-model completed row not found: %v", rows)
+	}
+	if toInt64(completedRow["quota_used"]) != 20 || toInt64(completedRow["prompt_tokens"]) != 170 || toInt64(completedRow["completion_tokens"]) != 70 {
+		t.Fatalf("cross-model trend totals wrong: %v", completedRow)
+	}
+	if toInt64(completedRow["unique_users"]) != 3 {
+		t.Fatalf("unique user total wrong: %v", completedRow)
+	}
+
+	dates, err := hist.ListDatesMissingQuota()
+	if err != nil {
+		t.Fatalf("ListDatesMissingQuota failed: %v", err)
+	}
+	if len(dates) != 1 || dates[0] != missingQuotaDate {
+		t.Fatalf("missing quota dates=%v, want one deduplicated date %s", dates, missingQuotaDate)
+	}
+	if err := hist.MarkQuotaBackfillDateComplete(missingQuotaDate); err != nil {
+		t.Fatalf("MarkQuotaBackfillDateComplete failed: %v", err)
+	}
+	if dates, err = hist.ListDatesMissingQuota(); err != nil || len(dates) != 0 {
+		t.Fatalf("completed zero-quota date should not be retried: dates=%v err=%v", dates, err)
+	}
+
+	if _, err := hist.db.Exec(`DELETE FROM model_daily_totals WHERE date = ?`, completedDate); err != nil {
+		t.Fatalf("delete daily totals failed: %v", err)
+	}
+	if has, err := hist.HasDate(completedDate); err != nil || !has {
+		t.Fatalf("legacy summary must remain visible: has=%v err=%v", has, err)
+	}
+	if dates, err = hist.ListDatesMissingQuota(); err != nil || len(dates) != 1 || dates[0] != completedDate {
+		t.Fatalf("legacy date without global totals must be migrated: dates=%v err=%v", dates, err)
+	}
+	if err := hist.MarkQuotaBackfillDateComplete(completedDate); err != nil {
+		t.Fatalf("mark legacy date complete failed: %v", err)
+	}
+
+	complete, err := hist.IsQuotaBackfillComplete()
+	if err != nil || complete {
+		t.Fatalf("initial quota backfill state=%v err=%v, want incomplete", complete, err)
+	}
+	if err := hist.MarkQuotaBackfillComplete(); err != nil {
+		t.Fatalf("MarkQuotaBackfillComplete failed: %v", err)
+	}
+	complete, err = hist.IsQuotaBackfillComplete()
+	if err != nil || !complete {
+		t.Fatalf("quota backfill state=%v err=%v, want complete", complete, err)
 	}
 }
 

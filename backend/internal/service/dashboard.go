@@ -232,7 +232,14 @@ func (s *DashboardService) GetDailyTrends(days int, noCache bool, compareMode st
 	startTime := now.AddDate(0, 0, -days).Unix()
 	tzOffset := localTZOffset()
 
-	currentRows, err := s.queryDailyTrends(startTime, days, tzOffset)
+	var currentRows []map[string]interface{}
+	var err error
+	if compareMode == "" {
+		currentRows, err = s.queryDailyTrends(startTime, days, tzOffset)
+	} else {
+		// Comparison periods must use the same source and metric semantics.
+		currentRows, err = s.queryDailyTrendsRaw(startTime, tzOffset)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -277,6 +284,28 @@ func (s *DashboardService) GetDailyTrends(days int, noCache bool, compareMode st
 // queryDailyTrends fetches rows from the best available source (quota_data or logs)
 // for a time window starting at startUnix and spanning 'days' calendar days.
 func (s *DashboardService) queryDailyTrends(startUnix int64, days int, tzOffset int) ([]map[string]interface{}, error) {
+	// Completed days come from the model-monitor history store. Today remains a
+	// live query because it is intentionally not persisted until tomorrow.
+	completedDays := days - 1
+	if completedDays > 0 {
+		if histSvc, histErr := GetModelHistoryService(); histErr == nil {
+			if historyRows, err := histSvc.QueryDailyAggregatedTrends(days, int64(tzOffset)); err == nil && len(historyRows) == completedDays {
+				today := time.Now().In(time.Local)
+				todayStart := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, time.Local).Unix()
+				liveRows, liveErr := s.queryDailyTrendsRaw(todayStart, tzOffset)
+				if liveErr != nil {
+					return nil, liveErr
+				}
+				return append(historyRows, liveRows...), nil
+			}
+		}
+	}
+
+	// A sparse/new history store cannot represent the requested range safely.
+	return s.queryDailyTrendsRaw(startUnix, tzOffset)
+}
+
+func (s *DashboardService) queryDailyTrendsRaw(startUnix int64, tzOffset int) ([]map[string]interface{}, error) {
 	dayGroupExpr := fmt.Sprintf("FLOOR((created_at + %d) / 86400)", tzOffset)
 
 	var rows []map[string]interface{}
