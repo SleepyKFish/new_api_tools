@@ -72,7 +72,6 @@ function specificDateLabel(mondayMs: number, dayIdx: number): string {
 function relativeWeekLabel(index: number, total: number): string {
   const diff = total - 1 - index // 0 = 最新(本周)
   if (diff <= 0) return '本周'
-  if (diff === 1) return '上周'
   return `${diff}周前`
 }
 
