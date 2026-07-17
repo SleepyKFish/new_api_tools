@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from './Toast'
 import { SpendAnalytics } from './SpendAnalytics'
@@ -153,7 +153,13 @@ export function Dashboard() {
   const [currentHourlyTrends, setCurrentHourlyTrends] = useState<DailyTrend[]>([])
   const currentHourlyRequestRef = useRef<Promise<boolean> | null>(null)
   const missingHourlyRequestRef = useRef<Promise<void> | null>(null)
-  const dailyTrends = mergeDailyTrends(completedHourlyTrends, currentHourlyTrends)
+  // useMemo 保持引用稳定:自动刷新倒计时每秒触发 Dashboard 重渲染,
+  // 若每次渲染都新建数组,下游图表 option 会随之重建(setOption notMerge),
+  // 导致正在显示的 tooltip 被销毁、legend 选中状态被重置。
+  const dailyTrends = useMemo(
+    () => mergeDailyTrends(completedHourlyTrends, currentHourlyTrends),
+    [completedHourlyTrends, currentHourlyTrends],
+  )
   const [trendsLoading, setTrendsLoading] = useState(true)
   // 近 28 天按天趋势,供「周内规律分析」使用(独立于当天小时趋势)
   const [weeklyTrends, setWeeklyTrends] = useState<DailyTrend[]>([])
