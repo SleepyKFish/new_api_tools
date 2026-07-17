@@ -55,6 +55,28 @@ function weekRangeLabel(mondayMs: number): string {
 }
 
 /**
+ * 给定周一周一的时间戳和星期几索引(0=周一~6=周日),
+ * 返回「MM-DD」——这一行的精确日期,tooltip 用以消除范围歧义。
+ */
+function specificDateLabel(mondayMs: number, dayIdx: number): string {
+  const d = new Date(mondayMs + dayIdx * 86400000)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())}`
+}
+
+/**
+ * 给定在 weeks[] 里的下标与总周数,返回相对周次标签:
+ * 总数=4 时,index 3 -> 本周 / 2 -> 上周 / 1 -> 2 周前 / 0 -> 3 周前。
+ * 总数 < 4 时按相同规则向前递推,不足 4 周的旧数据不会硬填到 3 周前。
+ */
+function relativeWeekLabel(index: number, total: number): string {
+  const diff = total - 1 - index // 0 = 最新(本周)
+  if (diff <= 0) return '本周'
+  if (diff === 1) return '上周'
+  return `${diff}周前`
+}
+
+/**
  * 环比涨跌标签:当前值相对前一周同一天的百分比变化。
  * 上升红(↑)、下降绿(↓)、持平灰;任一端缺数据显示占位「—」。
  */
@@ -248,11 +270,15 @@ function buildOption(m: ChartModel): EChartsOption {
         if (!arr.length) return ''
         const dayIdx = arr[0].dataIndex
         const day = WEEK_LABELS[dayIdx] ?? ''
+        const total = m.weeks.length
         // 每个星期几,列出 4 周的 花费/Token/命中率
+        // 每行用「具体日期 MM-DD」+「相对周次」取代原本的范围标签,
+        // 避免用户看到「06-22 ~ 06-28」还要心算今天是周四的哪一天。
         const rows = m.weeks
           .map((w, i) => {
-            const name = weekRangeLabel(w.key)
-            const color = WEEK_COLORS[WEEK_COLORS.length - m.weeks.length + i] ?? WEEK_COLORS[i]
+            const color = WEEK_COLORS[WEEK_COLORS.length - total + i] ?? WEEK_COLORS[i]
+            const dateLabel = specificDateLabel(w.key, dayIdx)
+            const weekCtx = relativeWeekLabel(i, total)
             const cost = w.cost[dayIdx]
             const tok = w.tokens[dayIdx]
             const rate = w.hitRate[dayIdx]
@@ -265,7 +291,10 @@ function buildOption(m: ChartModel): EChartsOption {
             const deltaStr = deltaLabel(prevCost, cost)
             return (
               `<div style="display:grid;grid-template-columns:9px 118px 60px 56px 60px 48px;column-gap:8px;align-items:center;line-height:22px">` +
-              `${dot(color)}<span style="color:#64748b">${name}</span>` +
+              `${dot(color)}` +
+              // 第一段:具体日期(深色,加粗);第二段:相对周次(浅灰,小号)
+              `<span><span style="color:#334155;font-weight:600">${dateLabel}</span> ` +
+              `<span style="color:#94a3b8;font-size:10px">${weekCtx}</span></span>` +
               `<span style="text-align:right;color:#334155;font-weight:600;font-variant-numeric:tabular-nums">${costStr}</span>` +
               `<span style="text-align:right;font-variant-numeric:tabular-nums">${deltaStr}</span>` +
               `<span style="text-align:right;color:#334155;font-variant-numeric:tabular-nums">${tokStr}</span>` +
