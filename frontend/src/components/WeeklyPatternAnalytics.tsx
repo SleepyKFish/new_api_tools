@@ -1,5 +1,5 @@
 /**
- * WeeklyPatternAnalytics —— 「周内规律分析（近4周 · 按星期几）」
+ * WeeklyPatternAnalytics —— 「周内规律分析（近4周）」
  *
  * 一个卡片,三个上下堆叠的子图共用「星期几」横坐标(周一~周日):
  * - 图1:每周·每天的额度花费(¥)
@@ -185,7 +185,7 @@ export function WeeklyPatternAnalytics({ dailyTrends, loading }: WeeklyPatternAn
             <div className="p-2 bg-primary/10 rounded-lg text-primary">
               <CalendarRange className="w-5 h-5" />
             </div>
-            周内规律分析（近4周 · 按星期几）
+            周内规律分析（近4周）
           </CardTitle>
           <div className="text-xs text-muted-foreground self-center">
             花费 · Token · 缓存命中率
