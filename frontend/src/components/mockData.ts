@@ -596,6 +596,16 @@ export const mockModelStatus = {
       { id: 3, name: 'DeepSeek CN', base: 850000 },
       { id: 5, name: 'Google Gemini', base: 620000 },
       { id: 7, name: 'Aliyun Bailian', base: 350000 },
+      { id: 8, name: 'Azure OpenAI', base: 330000 },
+      { id: 9, name: 'AWS Bedrock', base: 305000 },
+      { id: 11, name: 'Mistral EU', base: 280000 },
+      { id: 13, name: 'Groq Fast', base: 255000 },
+      { id: 14, name: 'Moonshot Kimi', base: 230000 },
+      { id: 16, name: 'Zhipu GLM', base: 210000 },
+      { id: 18, name: 'MiniMax', base: 190000 },
+      { id: 20, name: 'Baidu Qianfan', base: 175000 },
+      { id: 21, name: 'Tencent Hunyuan', base: 160000 },
+      { id: 23, name: 'Volcano Ark', base: 145000 },
     ]
 
     if (!compareMode) {
@@ -603,7 +613,7 @@ export const mockModelStatus = {
         channels: channels.map(ch => ({
           channel_id: ch.id,
           channel_name: ch.name,
-          current: genCostData(ch.base, ch.id),
+          current: genCostData(ch.base, ch.id, -1),
         })),
       }
     }

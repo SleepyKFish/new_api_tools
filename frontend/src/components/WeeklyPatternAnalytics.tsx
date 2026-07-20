@@ -21,6 +21,7 @@ import { DashboardECharts } from './DashboardECharts'
 import { Card, CardContent, CardHeader, CardTitle } from './ui/card'
 import { CalendarRange, BarChart3 } from 'lucide-react'
 import { formatTokens, QUOTA_PER_YUAN } from '../lib/format'
+import { mondayIndex, relativeWeekLabel, WEEK_COLORS, WEEKDAY_LABELS, weekRangeLabel, weekStartKey } from '../lib/week'
 
 interface DailyTrend {
   date?: string
@@ -40,20 +41,6 @@ export interface WeeklyPatternAnalyticsProps {
   loading?: boolean
 }
 
-const WEEK_LABELS = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
-// 最近 4 周从旧到新的配色(越新越深/越突出),第 4 条=本周用主色 sky。
-const WEEK_COLORS = ['#cbd5e1', '#93c5fd', '#38bdf8', '#0284c7']
-
-/** 把周一时间戳(ms)格式化为「MM-DD ~ MM-DD」的整周区间(周一~周日,补零对齐)。 */
-function weekRangeLabel(mondayMs: number): string {
-  const mon = new Date(mondayMs)
-  const sun = new Date(mondayMs)
-  sun.setDate(sun.getDate() + 6)
-  const p = (n: number) => String(n).padStart(2, '0')
-  const fmt = (d: Date) => `${p(d.getMonth() + 1)}-${p(d.getDate())}`
-  return `${fmt(mon)} ~ ${fmt(sun)}`
-}
-
 /**
  * 给定周一周一的时间戳和星期几索引(0=周一~6=周日),
  * 返回「MM-DD」——这一行的精确日期,tooltip 用以消除范围歧义。
@@ -62,17 +49,6 @@ function specificDateLabel(mondayMs: number, dayIdx: number): string {
   const d = new Date(mondayMs + dayIdx * 86400000)
   const p = (n: number) => String(n).padStart(2, '0')
   return `${p(d.getMonth() + 1)}-${p(d.getDate())}`
-}
-
-/**
- * 给定在 weeks[] 里的下标与总周数,返回相对周次标签:
- * 总数=4 时,index 3 -> 本周 / 2 -> 上周 / 1 -> 2 周前 / 0 -> 3 周前。
- * 总数 < 4 时按相同规则向前递推,不足 4 周的旧数据不会硬填到 3 周前。
- */
-function relativeWeekLabel(index: number, total: number): string {
-  const diff = total - 1 - index // 0 = 最新(本周)
-  if (diff <= 0) return '本周'
-  return `${diff}周前`
 }
 
 /**
@@ -101,19 +77,6 @@ function trendDate(d: DailyTrend): Date | null {
     }
   }
   return null
-}
-
-/** 周一=0 … 周日=6(把 JS 的 0=周日 归一化到周一起始)。 */
-function mondayIndex(date: Date): number {
-  const dow = date.getDay() // 0=Sun
-  return dow === 0 ? 6 : dow - 1
-}
-
-/** 该日期所在周的周一 0 点的本地时间戳(毫秒),用作周分组键。 */
-function weekStartKey(date: Date): number {
-  const d = new Date(date.getFullYear(), date.getMonth(), date.getDate())
-  d.setDate(d.getDate() - mondayIndex(d))
-  return d.getTime()
 }
 
 interface WeekBucket {
@@ -248,7 +211,7 @@ function buildOption(m: ChartModel): EChartsOption {
   return {
     animationDuration: 400,
     grid: [
-      { left: 60, right: 24, top: 40, height: 118 },
+      { left: 60, right: 24, top: 66, height: 118 },
       { left: 60, right: 24, top: 216, height: 118 },
       { left: 60, right: 24, top: 392, height: 118 },
     ],
@@ -268,7 +231,7 @@ function buildOption(m: ChartModel): EChartsOption {
         const arr = Array.isArray(params) ? params : [params]
         if (!arr.length) return ''
         const dayIdx = arr[0].dataIndex
-        const day = WEEK_LABELS[dayIdx] ?? ''
+        const day = WEEKDAY_LABELS[dayIdx] ?? ''
         const total = m.weeks.length
         // 列定义:dot | date(右对齐) | context | cost | delta | token | rate
         // 之前把 date+context 塞进 118px 单格,「本周」比「3周前」窄 1 字,
@@ -332,8 +295,9 @@ function buildOption(m: ChartModel): EChartsOption {
       data: legendData,
       top: 6,
       left: 'center',
-      itemWidth: 18,
-      itemHeight: 8,
+      icon: 'roundRect',
+      itemWidth: 22,
+      itemHeight: 10,
       itemGap: 18,
       textStyle: { color: labelColor, fontSize: 11 },
       // 图例默认只显示 series.name(就是周日期范围),通过 formatter 拼接相对周次
@@ -345,14 +309,14 @@ function buildOption(m: ChartModel): EChartsOption {
     },
     // 三个子图各一个标题(ECharts graphic 简化为 title 数组)
     title: [
-      { text: '额度花费 (¥)', left: 60, top: 24, textStyle: { fontSize: 11, color: labelColor, fontWeight: 'normal' as const } },
+      { text: '额度花费 (¥)', left: 60, top: 50, textStyle: { fontSize: 11, color: labelColor, fontWeight: 'normal' as const } },
       { text: 'Token 总量', left: 60, top: 200, textStyle: { fontSize: 11, color: labelColor, fontWeight: 'normal' as const } },
       { text: '缓存命中率 (%)', left: 60, top: 376, textStyle: { fontSize: 11, color: labelColor, fontWeight: 'normal' as const } },
     ],
     xAxis: [0, 1, 2].map(gridIndex => ({
       type: 'category' as const,
       gridIndex,
-      data: WEEK_LABELS,
+      data: WEEKDAY_LABELS,
       boundaryGap: true,
       axisLine,
       axisTick: { show: false },

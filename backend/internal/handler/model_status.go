@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/new-api-tools/backend/internal/logger"
 	"github.com/new-api-tools/backend/internal/models"
 	"github.com/new-api-tools/backend/internal/service"
 )
@@ -854,10 +855,28 @@ func GetChannelCostTrends(c *gin.Context) {
 		return
 	}
 
-	data, err := hist.GetChannelCostTrends(days, compare)
+	historyDays := days
+	if compare == "" {
+		historyDays--
+	}
+	data, err := hist.GetChannelCostTrends(historyDays, compare)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResp("QUERY_ERROR", err.Error(), ""))
 		return
+	}
+
+	if compare == "" {
+		now := time.Now()
+		todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local).Unix()
+		// A stable 30-second bucket lets concurrent dashboard loads share the
+		// model-status cache while still keeping today's values near real time.
+		liveEnd := now.Truncate(30 * time.Second).Add(30 * time.Second).Unix()
+		liveChannels, liveErr := service.NewModelStatusService().GetChannelPerformanceSummariesByRange(todayStart, liveEnd, true)
+		if liveErr != nil {
+			logger.L.Warn("[ChannelCostTrends] 读取今日渠道汇总失败: " + liveErr.Error())
+		} else {
+			service.MergeTodayChannelCostTrends(data, liveChannels, now.Format("2006-01-02"))
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": data})

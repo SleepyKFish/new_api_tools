@@ -1456,6 +1456,81 @@ func (s *ModelHistoryService) buildChannelCostTrends(
 	return channels
 }
 
+// MergeTodayChannelCostTrends appends today's live per-channel totals to the
+// completed-day history response. Existing channels receive a zero-valued
+// point first so the current calendar week remains visible even before their
+// first request today; live-only channels are added to the response.
+func MergeTodayChannelCostTrends(data map[string]interface{}, liveChannels []map[string]interface{}, today string) {
+	channels, _ := data["channels"].([]map[string]interface{})
+	byID := make(map[int64]map[string]interface{}, len(channels)+len(liveChannels))
+
+	for _, channel := range channels {
+		channelID := toInt64(channel["channel_id"])
+		current, _ := channel["current"].([]map[string]interface{})
+		current = upsertChannelCostPoint(current, map[string]interface{}{
+			"date":           today,
+			"total_quota":    int64(0),
+			"total_tokens":   int64(0),
+			"total_requests": int64(0),
+		})
+		channel["current"] = current
+		byID[channelID] = channel
+	}
+
+	for _, live := range liveChannels {
+		channelID := toInt64(live["channel_id"])
+		channel := byID[channelID]
+		if channel == nil {
+			name := toString(live["channel_name"])
+			if name == "" {
+				name = fmt.Sprintf("Channel#%d", channelID)
+			}
+			channel = map[string]interface{}{
+				"channel_id":   channelID,
+				"channel_name": name,
+				"current":      []map[string]interface{}{},
+			}
+			channels = append(channels, channel)
+			byID[channelID] = channel
+		}
+
+		current, _ := channel["current"].([]map[string]interface{})
+		current = upsertChannelCostPoint(current, map[string]interface{}{
+			"date":           today,
+			"total_quota":    int64(math.Round(toFloat64(live["total_quota"]))),
+			"total_tokens":   int64(math.Round(toFloat64(live["total_input_tokens"]) + toFloat64(live["total_output_tokens"]))),
+			"total_requests": toInt64(live["total_requests"]),
+		})
+		channel["current"] = current
+	}
+
+	sort.Slice(channels, func(i, j int) bool {
+		return channelCostPointSum(channels[i]) > channelCostPointSum(channels[j])
+	})
+	data["channels"] = channels
+	data["includes_today"] = true
+}
+
+func upsertChannelCostPoint(points []map[string]interface{}, point map[string]interface{}) []map[string]interface{} {
+	date, _ := point["date"].(string)
+	for index, existing := range points {
+		if existingDate, _ := existing["date"].(string); existingDate == date {
+			points[index] = point
+			return points
+		}
+	}
+	return append(points, point)
+}
+
+func channelCostPointSum(channel map[string]interface{}) int64 {
+	points, _ := channel["current"].([]map[string]interface{})
+	var total int64
+	for _, point := range points {
+		total += toInt64(point["total_quota"])
+	}
+	return total
+}
+
 // QueryDailyAggregatedTrends returns daily Token/cache trends aggregated across
 // all channels, using the day_group format expected by fillDailyGaps.
 //

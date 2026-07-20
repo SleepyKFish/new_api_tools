@@ -1,7 +1,7 @@
 import { lazy, Suspense, useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from './Toast'
-import type { ChannelCostTrendData, ChannelSpendDays } from './ChannelSpendComparison'
+import type { ChannelCostTrendData } from './ChannelSpendComparison'
 import { Users, Key, Server, Box, Ticket, Zap, Crown, Loader2, RefreshCw, Activity, BarChart3, Clock, Database, Timer, ChevronDown, Hash, ArrowDownToLine, ArrowUpFromLine } from 'lucide-react'
 import { Card, CardContent } from './ui/card'
 import { Button } from './ui/button'
@@ -168,7 +168,6 @@ export function Dashboard() {
   const [weeklyTrends, setWeeklyTrends] = useState<DailyTrend[]>([])
   const [weeklyLoading, setWeeklyLoading] = useState(true)
   const [channelSpendData, setChannelSpendData] = useState<ChannelCostTrendData | null>(null)
-  const [channelSpendDays, setChannelSpendDays] = useState<ChannelSpendDays>(7)
   const [channelSpendLoading, setChannelSpendLoading] = useState(true)
   const [analyticsSummary, setAnalyticsSummary] = useState<AnalyticsSummary | null>(null)
   const [analyticsLoaded, setAnalyticsLoaded] = useState(false)
@@ -306,16 +305,12 @@ export function Dashboard() {
       if (MOCK_MODE) {
         await delay(180)
         if (signal?.aborted) return false
-        setChannelSpendData(mockModelStatus.getChannelCostTrends(
-          channelSpendDays,
-          channelSpendDays === 30 ? 'month' : 'week',
-        ) as ChannelCostTrendData)
+        setChannelSpendData(mockModelStatus.getChannelCostTrends(28, '') as ChannelCostTrendData)
         return true
       }
 
-      const compare = channelSpendDays === 30 ? 'month' : 'week'
       const response = await fetch(
-        `${apiUrl}/api/model-status/channels/cost-trends?days=${channelSpendDays}&compare=${compare}`,
+        `${apiUrl}/api/model-status/channels/cost-trends?days=28`,
         { headers: getAuthHeaders(), signal },
       )
       const result = await response.json()
@@ -333,7 +328,7 @@ export function Dashboard() {
       if (!signal?.aborted) setChannelSpendLoading(false)
     }
     return false
-  }, [apiUrl, channelSpendDays, getAuthHeaders])
+  }, [apiUrl, getAuthHeaders])
 
   const mergeCompletedHourlyTrends = useCallback((trends: DailyTrend[]) => {
     const completedKeys = new Set(trends.map(trendHourKey).filter(Boolean))
@@ -1075,9 +1070,7 @@ export function Dashboard() {
       <Suspense fallback={<DashboardChartFallback height={430} />}>
         <ChannelSpendComparison
           data={channelSpendData}
-          days={channelSpendDays}
           loading={channelSpendLoading}
-          onDaysChange={setChannelSpendDays}
         />
       </Suspense>
 

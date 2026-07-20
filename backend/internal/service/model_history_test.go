@@ -64,6 +64,85 @@ func TestChannelCostTrendsUseCompletedDaysAndPreservePreviousOnlyChannels(t *tes
 	}
 }
 
+func TestMergeTodayChannelCostTrendsAddsCurrentWeekPoint(t *testing.T) {
+	today := "2026-07-20"
+	data := map[string]interface{}{
+		"channels": []map[string]interface{}{
+			{
+				"channel_id":   int64(1),
+				"channel_name": "existing-live",
+				"current": []map[string]interface{}{
+					{"date": "2026-07-19", "total_quota": int64(100)},
+				},
+			},
+			{
+				"channel_id":   int64(2),
+				"channel_name": "existing-idle",
+				"current": []map[string]interface{}{
+					{"date": "2026-07-19", "total_quota": int64(50)},
+				},
+			},
+		},
+	}
+	live := []map[string]interface{}{
+		{
+			"channel_id":          int64(1),
+			"channel_name":        "existing-live",
+			"total_quota":         float64(25),
+			"total_input_tokens":  float64(300),
+			"total_output_tokens": float64(40),
+			"total_requests":      int64(7),
+		},
+		{
+			"channel_id":          int64(3),
+			"channel_name":        "live-only",
+			"total_quota":         float64(10),
+			"total_input_tokens":  float64(80),
+			"total_output_tokens": float64(20),
+			"total_requests":      int64(3),
+		},
+	}
+
+	MergeTodayChannelCostTrends(data, live, today)
+
+	channels, ok := data["channels"].([]map[string]interface{})
+	if !ok || len(channels) != 3 {
+		t.Fatalf("channels=%T %v, want three channels", data["channels"], data["channels"])
+	}
+	if data["includes_today"] != true {
+		t.Fatalf("includes_today=%v, want true", data["includes_today"])
+	}
+
+	byID := make(map[int64]map[string]interface{}, len(channels))
+	for _, channel := range channels {
+		byID[toInt64(channel["channel_id"])] = channel
+	}
+
+	assertTodayPoint := func(channelID, quota, tokens, requests int64) {
+		t.Helper()
+		points := byID[channelID]["current"].([]map[string]interface{})
+		var todayPoint map[string]interface{}
+		for _, point := range points {
+			if point["date"] == today {
+				todayPoint = point
+				break
+			}
+		}
+		if todayPoint == nil {
+			t.Fatalf("channel %d has no point for today: %v", channelID, points)
+		}
+		if toInt64(todayPoint["total_quota"]) != quota ||
+			toInt64(todayPoint["total_tokens"]) != tokens ||
+			toInt64(todayPoint["total_requests"]) != requests {
+			t.Fatalf("channel %d today=%v, want quota=%d tokens=%d requests=%d", channelID, todayPoint, quota, tokens, requests)
+		}
+	}
+
+	assertTodayPoint(1, 25, 340, 7)
+	assertTodayPoint(2, 0, 0, 0)
+	assertTodayPoint(3, 10, 100, 3)
+}
+
 // resetHistorySingleton clears the lazily-initialized singleton so each test
 // can open a fresh database under its own temp dir.
 func resetHistorySingleton() {
