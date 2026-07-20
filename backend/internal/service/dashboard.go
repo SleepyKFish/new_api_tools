@@ -610,6 +610,34 @@ func (s *DashboardService) GetPreviousHourlyTrend(noCache bool) ([]map[string]in
 	return s.getCompletedHourlyTrend(start, end, noCache)
 }
 
+// GetCompletedTodayHourlyTrends returns all fully completed hours from local
+// midnight to the start of the current hour in one bounded aggregation.
+func (s *DashboardService) GetCompletedTodayHourlyTrends(noCache bool) ([]map[string]interface{}, error) {
+	start, end, hours := completedTodayRange(time.Now())
+	if hours == 0 {
+		return []map[string]interface{}{}, nil
+	}
+
+	cacheKey := fmt.Sprintf("dashboard:hourly:completed-today:v1:%s:%02d", start.Format("20060102"), hours)
+	cm := cache.Get()
+	if !noCache {
+		var cached []map[string]interface{}
+		if found, _ := cm.GetJSON(cacheKey, &cached); found {
+			return cached, nil
+		}
+	}
+
+	_, tzOffset := start.Zone()
+	rows, err := s.queryHourlyTrendRange(start.Unix(), end.Unix(), tzOffset)
+	if err != nil {
+		return nil, err
+	}
+
+	result := fillHourlyGapsAt(rows, hours, tzOffset, end.Add(-time.Hour))
+	cm.Set(cacheKey, result, 25*time.Hour)
+	return result, nil
+}
+
 // GetCompletedHourlyTrend returns one completed hour from the current local day.
 func (s *DashboardService) GetCompletedHourlyTrend(startUnix int64, noCache bool) ([]map[string]interface{}, error) {
 	start, end, err := completedHourRange(startUnix, time.Now())
@@ -662,6 +690,13 @@ func completedHourRange(startUnix int64, now time.Time) (time.Time, time.Time, e
 func previousCompleteHourRange(now time.Time) (time.Time, time.Time) {
 	end, _ := currentHourRange(now)
 	return end.Add(-time.Hour), end
+}
+
+func completedTodayRange(now time.Time) (time.Time, time.Time, int) {
+	end, _ := currentHourRange(now)
+	start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	hours := int(end.Sub(start) / time.Hour)
+	return start, end, hours
 }
 
 // queryHourlyTrends fetches hourly rows from logs table.

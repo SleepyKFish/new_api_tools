@@ -34,6 +34,27 @@ func TestCurrentHourRange(t *testing.T) {
 	}
 }
 
+func TestCompletedTodayRange(t *testing.T) {
+	loc := time.FixedZone("UTC+8", 8*60*60)
+	now := time.Date(2026, time.July, 17, 10, 37, 42, 0, loc)
+
+	start, end, hours := completedTodayRange(now)
+	if want := time.Date(2026, time.July, 17, 0, 0, 0, 0, loc); !start.Equal(want) {
+		t.Fatalf("start = %v, want %v", start, want)
+	}
+	if want := time.Date(2026, time.July, 17, 10, 0, 0, 0, loc); !end.Equal(want) {
+		t.Fatalf("end = %v, want %v", end, want)
+	}
+	if hours != 10 {
+		t.Fatalf("hours = %d, want 10", hours)
+	}
+
+	_, midnightEnd, midnightHours := completedTodayRange(start)
+	if !midnightEnd.Equal(start) || midnightHours != 0 {
+		t.Fatalf("midnight range end=%v hours=%d, want end=%v hours=0", midnightEnd, midnightHours, start)
+	}
+}
+
 func TestCompletedHourRange(t *testing.T) {
 	loc := time.FixedZone("UTC+8", 8*60*60)
 	now := time.Date(2026, time.July, 17, 10, 37, 42, 0, loc)

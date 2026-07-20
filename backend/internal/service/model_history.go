@@ -1247,12 +1247,11 @@ func dayStartTimestamp(date string) int64 {
 // GetChannelCostTrends returns per-channel daily cost (quota) for a date range
 // with optional week-over-week or month-over-month comparison.
 func (s *ModelHistoryService) GetChannelCostTrends(days int, compareMode string) (map[string]interface{}, error) {
-	now := time.Now()
-	// Generate date strings for current period
-	dates := make([]string, days)
-	for i := 0; i < days; i++ {
-		dates[i] = now.AddDate(0, 0, -days+1+i).Format("2006-01-02")
-	}
+	// Daily channel snapshots are finalized after the day closes, so the
+	// current comparison period must end yesterday rather than include a
+	// partially populated (or absent) row for today.
+	periodEnd := time.Now().AddDate(0, 0, -1)
+	dates := channelCostDateRange(periodEnd, days)
 
 	// Query all channel data for current dates
 	currentByChannel, channelNames, err := s.queryChannelCostForDates(dates)
@@ -1261,6 +1260,9 @@ func (s *ModelHistoryService) GetChannelCostTrends(days int, compareMode string)
 	}
 
 	if compareMode == "" {
+		for channelID, data := range currentByChannel {
+			currentByChannel[channelID] = alignChannelCostData(data, dates)
+		}
 		channels := s.buildChannelCostTrends(currentByChannel, channelNames, dates, nil, nil)
 		return map[string]interface{}{"channels": channels}, nil
 	}
@@ -1271,29 +1273,34 @@ func (s *ModelHistoryService) GetChannelCostTrends(days int, compareMode string)
 		offsetDays = 30
 	}
 
-	prevDates := make([]string, days)
-	for i := 0; i < days; i++ {
-		prevDates[i] = now.AddDate(0, 0, -days+1+i-offsetDays).Format("2006-01-02")
-	}
+	prevDates := channelCostDateRange(periodEnd.AddDate(0, 0, -offsetDays), days)
 
-	prevByChannel, _, err := s.queryChannelCostForDates(prevDates)
+	prevByChannel, prevChannelNames, err := s.queryChannelCostForDates(prevDates)
 	if err != nil {
 		return nil, err
 	}
 
+	channelIDs := make(map[int64]struct{}, len(currentByChannel)+len(prevByChannel))
+	for channelID := range currentByChannel {
+		channelIDs[channelID] = struct{}{}
+	}
+	for channelID := range prevByChannel {
+		channelIDs[channelID] = struct{}{}
+		if channelNames[channelID] == "" {
+			channelNames[channelID] = prevChannelNames[channelID]
+		}
+	}
+
 	comparison := make(map[int64][]map[string]interface{})
-	for chID, curData := range currentByChannel {
-		prevData := prevByChannel[chID]
+	for chID := range channelIDs {
+		curData := alignChannelCostData(currentByChannel[chID], dates)
+		prevData := alignChannelCostData(prevByChannel[chID], prevDates)
+		currentByChannel[chID] = curData
+		prevByChannel[chID] = prevData
 		comp := make([]map[string]interface{}, days)
 		for i := 0; i < days; i++ {
-			curVal := int64(0)
-			prevVal := int64(0)
-			if i < len(curData) {
-				curVal = toInt64(curData[i]["total_quota"])
-			}
-			if i < len(prevData) {
-				prevVal = toInt64(prevData[i]["total_quota"])
-			}
+			curVal := toInt64(curData[i]["total_quota"])
+			prevVal := toInt64(prevData[i]["total_quota"])
 			entry := map[string]interface{}{"date": dates[i]}
 			if prevVal > 0 {
 				entry["total_quota_change"] = math.Round(float64(curVal-prevVal)/float64(prevVal)*10000) / 100
@@ -1315,6 +1322,41 @@ func (s *ModelHistoryService) GetChannelCostTrends(days int, compareMode string)
 		"compare_mode":   modeLabel,
 		"compare_offset": offsetDays,
 	}, nil
+}
+
+func channelCostDateRange(end time.Time, days int) []string {
+	if days <= 0 {
+		return []string{}
+	}
+	dates := make([]string, days)
+	for i := 0; i < days; i++ {
+		dates[i] = end.AddDate(0, 0, -days+1+i).Format("2006-01-02")
+	}
+	return dates
+}
+
+func alignChannelCostData(data []map[string]interface{}, dates []string) []map[string]interface{} {
+	byDate := make(map[string]map[string]interface{}, len(data))
+	for _, item := range data {
+		if date, ok := item["date"].(string); ok {
+			byDate[date] = item
+		}
+	}
+
+	aligned := make([]map[string]interface{}, len(dates))
+	for i, date := range dates {
+		if item, ok := byDate[date]; ok {
+			aligned[i] = item
+			continue
+		}
+		aligned[i] = map[string]interface{}{
+			"date":           date,
+			"total_quota":    int64(0),
+			"total_tokens":   int64(0),
+			"total_requests": int64(0),
+		}
+	}
+	return aligned
 }
 
 // queryChannelCostForDates queries model_daily_channel for a list of dates

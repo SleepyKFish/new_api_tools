@@ -1,6 +1,7 @@
 package service
 
 import (
+	"database/sql"
 	"errors"
 	"os"
 	"sync"
@@ -9,6 +10,59 @@ import (
 
 	"github.com/new-api-tools/backend/internal/config"
 )
+
+func TestChannelCostTrendsUseCompletedDaysAndPreservePreviousOnlyChannels(t *testing.T) {
+	db, err := sql.Open("sqlite", "file:channel-cost-trends?mode=memory&cache=shared")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer db.Close()
+
+	hist := &ModelHistoryService{db: db}
+	if err := hist.ensureSchema(); err != nil {
+		t.Fatalf("ensureSchema: %v", err)
+	}
+
+	yesterday := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
+	previousWeek := time.Now().AddDate(0, 0, -8).Format("2006-01-02")
+	insert := `INSERT INTO model_daily_channel
+		(date, channel_id, channel_name, total_requests, quota_sum)
+		VALUES (?, ?, ?, ?, ?)`
+	if _, err := db.Exec(insert, yesterday, 1, "current", 10, 1000); err != nil {
+		t.Fatalf("insert current channel: %v", err)
+	}
+	if _, err := db.Exec(insert, previousWeek, 2, "previous-only", 5, 500); err != nil {
+		t.Fatalf("insert previous-only channel: %v", err)
+	}
+
+	result, err := hist.GetChannelCostTrends(1, "week")
+	if err != nil {
+		t.Fatalf("GetChannelCostTrends: %v", err)
+	}
+	channels, ok := result["channels"].([]map[string]interface{})
+	if !ok || len(channels) != 2 {
+		t.Fatalf("channels=%T %v, want two channels", result["channels"], result["channels"])
+	}
+
+	var previousOnly map[string]interface{}
+	for _, channel := range channels {
+		current := channel["current"].([]map[string]interface{})
+		if len(current) != 1 || current[0]["date"] != yesterday {
+			t.Fatalf("current series must end yesterday: %v", current)
+		}
+		if toInt64(channel["channel_id"]) == 2 {
+			previousOnly = channel
+		}
+	}
+	if previousOnly == nil {
+		t.Fatal("channel present only in the previous period was dropped")
+	}
+	current := previousOnly["current"].([]map[string]interface{})
+	previous := previousOnly["previous"].([]map[string]interface{})
+	if toInt64(current[0]["total_quota"]) != 0 || toInt64(previous[0]["total_quota"]) != 500 {
+		t.Fatalf("previous-only channel series misaligned: current=%v previous=%v", current, previous)
+	}
+}
 
 // resetHistorySingleton clears the lazily-initialized singleton so each test
 // can open a fresh database under its own temp dir.

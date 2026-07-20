@@ -570,14 +570,15 @@ export const mockModelStatus = {
 
   getChannelCostTrends(days: number, compareMode: string) {
     const today = new Date()
-    const pad = (n: number) => n < 10 ? `0${n}` : ''
+    const pad = (n: number) => n < 10 ? `0${n}` : String(n)
     const fmt = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`
 
-    const genCostData = (baseQuota: number, seed: number) => {
+    const genCostData = (baseQuota: number, seed: number, dateOffset = 0) => {
       const data: Array<{date: string; total_quota: number; total_tokens: number; total_requests: number}> = []
       for (let i = days - 1; i >= 0; i--) {
         const d = new Date(today)
-        d.setDate(d.getDate() - i)
+        // Historical channel snapshots contain completed days only.
+        d.setDate(d.getDate() - i - dateOffset - 1)
         const dow = d.getDay()
         const isWeekend = dow === 0 || dow === 6
         const noise = Math.sin(i * 1.3 + seed) * 0.3 + 1
@@ -611,7 +612,7 @@ export const mockModelStatus = {
     return {
       channels: channels.map(ch => {
         const current = genCostData(ch.base, ch.id)
-        const previous = genCostData(ch.base * 0.88, ch.id + 10)
+        const previous = genCostData(ch.base * 0.88, ch.id + 10, offsetDays)
         const comparison = current.map((cur, i) => {
           const prev = previous[i]
           const change = prev.total_quota > 0

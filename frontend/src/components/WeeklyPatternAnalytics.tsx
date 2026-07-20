@@ -16,8 +16,8 @@
  */
 
 import { useMemo } from 'react'
-import ReactECharts from 'echarts-for-react'
 import type { EChartsOption } from 'echarts'
+import { DashboardECharts } from './DashboardECharts'
 import { Card, CardContent, CardHeader, CardTitle } from './ui/card'
 import { CalendarRange, BarChart3 } from 'lucide-react'
 import { formatTokens, QUOTA_PER_YUAN } from '../lib/format'
@@ -196,7 +196,7 @@ export function WeeklyPatternAnalytics({ dailyTrends, loading }: WeeklyPatternAn
         {loading ? (
           <div className="h-[560px] animate-pulse bg-muted/20 rounded-lg" />
         ) : hasData ? (
-          <ReactECharts
+          <DashboardECharts
             option={option}
             style={{ height: 560, width: '100%' }}
             opts={{ renderer: 'canvas' }}

@@ -10,8 +10,8 @@
  */
 
 import { useMemo } from 'react'
-import ReactECharts from 'echarts-for-react'
 import type { EChartsOption } from 'echarts'
+import { DashboardECharts } from './DashboardECharts'
 import { Card, CardContent, CardHeader, CardTitle } from './ui/card'
 import { Wallet, BarChart3 } from 'lucide-react'
 import { formatCostPrecise, formatTokens, QUOTA_PER_YUAN } from '../lib/format'
@@ -158,7 +158,7 @@ export function SpendAnalytics({ dailyTrends, loading }: SpendAnalyticsProps) {
         {loading ? (
           <div className="h-[480px] animate-pulse bg-muted/20 rounded-lg" />
         ) : hasData ? (
-          <ReactECharts
+          <DashboardECharts
             option={option}
             style={{ height: 480, width: '100%' }}
             opts={{ renderer: 'canvas' }}

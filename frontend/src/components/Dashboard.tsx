@@ -1,15 +1,18 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import { lazy, Suspense, useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from './Toast'
-import { SpendAnalytics } from './SpendAnalytics'
-import { WeeklyPatternAnalytics } from './WeeklyPatternAnalytics'
+import type { ChannelCostTrendData, ChannelSpendDays } from './ChannelSpendComparison'
 import { Users, Key, Server, Box, Ticket, Zap, Crown, Loader2, RefreshCw, Activity, BarChart3, Clock, Database, Timer, ChevronDown, Hash, ArrowDownToLine, ArrowUpFromLine } from 'lucide-react'
 import { Card, CardContent } from './ui/card'
 import { Button } from './ui/button'
 import { cn } from '../lib/utils'
 import { formatCostPrecise, formatNumber } from '../lib/format'
 import { MOCK_MODE } from '../lib/env'
-import { mockDashboardData } from './mockData'
+import { mockDashboardData, mockModelStatus } from './mockData'
+
+const SpendAnalytics = lazy(() => import('./SpendAnalytics').then(module => ({ default: module.SpendAnalytics })))
+const WeeklyPatternAnalytics = lazy(() => import('./WeeklyPatternAnalytics').then(module => ({ default: module.WeeklyPatternAnalytics })))
+const ChannelSpendComparison = lazy(() => import('./ChannelSpendComparison').then(module => ({ default: module.ChannelSpendComparison })))
 
 type RefreshInterval = 0 | 30 | 60 | 120 | 300 // 秒，0表示关闭
 const SPEND_TRENDS_CACHE_KEY = `dashboard_spend_hourly_v2:${MOCK_MODE ? 'mock' : 'live'}`
@@ -152,7 +155,7 @@ export function Dashboard() {
   const completedHourlyTrendsRef = useRef(completedHourlyTrends)
   const [currentHourlyTrends, setCurrentHourlyTrends] = useState<DailyTrend[]>([])
   const currentHourlyRequestRef = useRef<Promise<boolean> | null>(null)
-  const missingHourlyRequestRef = useRef<Promise<void> | null>(null)
+  const completedTodayRequestRef = useRef<Promise<void> | null>(null)
   // useMemo 保持引用稳定:自动刷新倒计时每秒触发 Dashboard 重渲染,
   // 若每次渲染都新建数组,下游图表 option 会随之重建(setOption notMerge),
   // 导致正在显示的 tooltip 被销毁、legend 选中状态被重置。
@@ -164,8 +167,11 @@ export function Dashboard() {
   // 近 28 天按天趋势,供「周内规律分析」使用(独立于当天小时趋势)
   const [weeklyTrends, setWeeklyTrends] = useState<DailyTrend[]>([])
   const [weeklyLoading, setWeeklyLoading] = useState(true)
+  const [channelSpendData, setChannelSpendData] = useState<ChannelCostTrendData | null>(null)
+  const [channelSpendDays, setChannelSpendDays] = useState<ChannelSpendDays>(7)
+  const [channelSpendLoading, setChannelSpendLoading] = useState(true)
   const [analyticsSummary, setAnalyticsSummary] = useState<AnalyticsSummary | null>(null)
-  const [loading, setLoading] = useState(true)
+  const [analyticsLoaded, setAnalyticsLoaded] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
   // 固定「当天 · 按小时」视角(不再提供 today/week/month 切换)
   const [period] = useState<PeriodType>('today')
@@ -232,6 +238,7 @@ export function Dashboard() {
         quota_used: sortedByQuota[0].quota_used,
       } : null,
     })
+    setAnalyticsLoaded(true)
     return true
   }, [])
 
@@ -245,8 +252,10 @@ export function Dashboard() {
         { headers: getAuthHeaders(), signal },
       )
       const data = await response.json()
-      if (data.success) setOverview(data.data)
-      return true
+      if (data.success) {
+        setOverview(data.data)
+        return true
+      }
     } catch (error) { console.error('Failed to fetch overview:', error) }
     return false
   }, [apiUrl, getAuthHeaders, period])
@@ -259,8 +268,10 @@ export function Dashboard() {
         { headers: getAuthHeaders(), signal },
       )
       const data = await response.json()
-      if (data.success) setUsage(data.data)
-      return true
+      if (data.success) {
+        setUsage(data.data)
+        return true
+      }
     } catch (error) { console.error('Failed to fetch usage:', error) }
     return false
   }, [apiUrl, getAuthHeaders, period])
@@ -288,6 +299,41 @@ export function Dashboard() {
     }
     return false
   }, [apiUrl, getAuthHeaders])
+
+  const fetchChannelSpend = useCallback(async (signal?: AbortSignal): Promise<boolean> => {
+    setChannelSpendLoading(true)
+    try {
+      if (MOCK_MODE) {
+        await delay(180)
+        if (signal?.aborted) return false
+        setChannelSpendData(mockModelStatus.getChannelCostTrends(
+          channelSpendDays,
+          channelSpendDays === 30 ? 'month' : 'week',
+        ) as ChannelCostTrendData)
+        return true
+      }
+
+      const compare = channelSpendDays === 30 ? 'month' : 'week'
+      const response = await fetch(
+        `${apiUrl}/api/model-status/channels/cost-trends?days=${channelSpendDays}&compare=${compare}`,
+        { headers: getAuthHeaders(), signal },
+      )
+      const result = await response.json()
+      if (result.success && result.data && Array.isArray(result.data.channels)) {
+        setChannelSpendData(result.data as ChannelCostTrendData)
+        return true
+      }
+      setChannelSpendData(null)
+    } catch (error) {
+      if (!signal?.aborted) {
+        console.error('Failed to fetch channel spend comparison:', error)
+        setChannelSpendData(null)
+      }
+    } finally {
+      if (!signal?.aborted) setChannelSpendLoading(false)
+    }
+    return false
+  }, [apiUrl, channelSpendDays, getAuthHeaders])
 
   const mergeCompletedHourlyTrends = useCallback((trends: DailyTrend[]) => {
     const completedKeys = new Set(trends.map(trendHourKey).filter(Boolean))
@@ -340,64 +386,54 @@ export function Dashboard() {
     }
   }, [apiUrl, getAuthHeaders, replaceCurrentHourlyTrend])
 
-  // 完整小时只会进入历史缓存，不参与实时轮询。
-  const fetchCompletedHourlyTrend = useCallback(async (hourStart: Date, signal?: AbortSignal): Promise<boolean> => {
-    try {
-      if (MOCK_MODE) {
-        await delay(80)
-        const hour = localHourKey(hourStart)
-        mergeCompletedHourlyTrends(mockDashboardData.getToday().filter(item => item.hour === hour))
-        return true
-      }
-
-      const start = Math.floor(hourStart.getTime() / 1_000)
-      const response = await fetch(
-        `${apiUrl}/api/dashboard/trends/hourly/completed?start=${start}`,
-        { headers: getAuthHeaders(), signal },
-      )
-      const data = await response.json()
-      if (data.success && Array.isArray(data.data)) {
-        mergeCompletedHourlyTrends(data.data)
-        return true
-      }
-    } catch (error) {
-      if (!signal?.aborted) console.error('Failed to fetch completed hourly trend:', error)
-    }
-    return false
-  }, [apiUrl, getAuthHeaders, mergeCompletedHourlyTrends])
-
-  // 已有完整小时不会重复请求；缓存缺失时按最近到最早逐小时补齐。
-  const fetchMissingCompletedHourlyTrends = useCallback(async (signal?: AbortSignal): Promise<void> => {
-    if (missingHourlyRequestRef.current) return missingHourlyRequestRef.current
+  // 首次进入或本地缓存缺失时，一次请求补齐今天所有已完成小时。
+  const fetchCompletedTodayTrends = useCallback(async (signal?: AbortSignal): Promise<void> => {
+    if (completedTodayRequestRef.current) return completedTodayRequestRef.current
 
     const request = (async () => {
       const today = localDayKey()
       const cursor = new Date()
       cursor.setMinutes(0, 0, 0)
       cursor.setHours(cursor.getHours() - 1)
-      const missing: Date[] = []
+      const expectedHours: string[] = []
 
       while (localDayKey(cursor) === today) {
-        const hour = localHourKey(cursor)
-        if (!completedHourlyTrendsRef.current.some(trend => trendHourKey(trend) === hour)) {
-          missing.push(new Date(cursor))
-        }
+        expectedHours.push(localHourKey(cursor))
         cursor.setHours(cursor.getHours() - 1)
       }
 
-      for (const hourStart of missing) {
-        if (signal?.aborted) return
-        if (!await fetchCompletedHourlyTrend(hourStart, signal)) return
+      const cachedHours = new Set(completedHourlyTrendsRef.current.map(trendHourKey))
+      if (expectedHours.every(hour => cachedHours.has(hour))) return
+
+      try {
+        if (MOCK_MODE) {
+          await delay(80)
+          if (signal?.aborted) return
+          const expected = new Set(expectedHours)
+          mergeCompletedHourlyTrends(mockDashboardData.getToday().filter(item => expected.has(trendHourKey(item))))
+          return
+        }
+
+        const response = await fetch(
+          `${apiUrl}/api/dashboard/trends/hourly/completed/today`,
+          { headers: getAuthHeaders(), signal },
+        )
+        const data = await response.json()
+        if (data.success && Array.isArray(data.data)) {
+          mergeCompletedHourlyTrends(data.data)
+        }
+      } catch (error) {
+        if (!signal?.aborted) console.error('Failed to fetch completed hourly trends:', error)
       }
     })()
 
-    missingHourlyRequestRef.current = request
+    completedTodayRequestRef.current = request
     try {
       await request
     } finally {
-      if (missingHourlyRequestRef.current === request) missingHourlyRequestRef.current = null
+      if (completedTodayRequestRef.current === request) completedTodayRequestRef.current = null
     }
-  }, [fetchCompletedHourlyTrend])
+  }, [apiUrl, getAuthHeaders, mergeCompletedHourlyTrends])
 
   // 整点后只结算上一个完整小时一次。
   const fetchPreviousHourlyTrend = useCallback(async (signal?: AbortSignal): Promise<boolean> => {
@@ -434,7 +470,7 @@ export function Dashboard() {
       )
       const data = await response.json()
 
-      if (data.success && data.data.length > 0) {
+      if (data.success && Array.isArray(data.data) && data.data.length > 0) {
         const sortedByRequest = [...data.data].sort((a: any, b: any) => b.request_count - a.request_count)
         const sortedByQuota = [...data.data].sort((a: any, b: any) => b.quota_used - a.quota_used)
 
@@ -453,8 +489,9 @@ export function Dashboard() {
       } else {
         setAnalyticsSummary(null)
       }
-      return true
+      return Boolean(data.success)
     } catch (error) { console.error('Failed to fetch analytics summary:', error) }
+    finally { if (!signal?.aborted) setAnalyticsLoaded(true) }
     return false
   }, [apiUrl, getAuthHeaders, period])
 
@@ -476,7 +513,7 @@ export function Dashboard() {
   const refreshAll = useCallback(async (signal?: AbortSignal): Promise<boolean> => {
     if (MOCK_MODE) {
       const results = await Promise.all([
-        mockOverview(), mockUsage(), mockAnalyticsSummary(), fetchCurrentHourlyTrend(true, signal),
+        mockOverview(), mockUsage(), mockAnalyticsSummary(), fetchCurrentHourlyTrend(true, signal), fetchChannelSpend(signal),
       ])
       return results.every(Boolean)
     }
@@ -485,9 +522,10 @@ export function Dashboard() {
       fetchUsage(true, signal),
       fetchAnalyticsSummary(true, signal),
       fetchCurrentHourlyTrend(true, signal),
+      fetchChannelSpend(signal),
     ])
     return results.every(Boolean)
-  }, [fetchOverview, fetchUsage, fetchAnalyticsSummary, fetchCurrentHourlyTrend, mockOverview, mockUsage, mockAnalyticsSummary])
+  }, [fetchOverview, fetchUsage, fetchAnalyticsSummary, fetchCurrentHourlyTrend, fetchChannelSpend, mockOverview, mockUsage, mockAnalyticsSummary])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -504,9 +542,12 @@ export function Dashboard() {
       }, msUntilNextHourlyRefresh())
     }
 
-    const loadCurrentHour = async () => {
+    const loadTodayTrends = async () => {
       try {
-        await fetchCurrentHourlyTrend(false, controller.signal)
+        await Promise.all([
+          fetchCurrentHourlyTrend(false, controller.signal),
+          fetchCompletedTodayTrends(controller.signal),
+        ])
       } finally {
         if (active) setTrendsLoading(false)
       }
@@ -523,22 +564,29 @@ export function Dashboard() {
     const handleVisibilityChange = () => {
       if (document.visibilityState !== 'visible') return
       void fetchCurrentHourlyTrend(false, controller.signal)
-      void fetchMissingCompletedHourlyTrends(controller.signal)
+      void fetchCompletedTodayTrends(controller.signal)
     }
 
     document.addEventListener('visibilitychange', handleVisibilityChange)
-    void loadCurrentHour()
+    void loadTodayTrends()
     void loadWeekly()
-    void fetchMissingCompletedHourlyTrends(controller.signal)
     scheduleNextBoundary()
 
     return () => {
       active = false
+      currentHourlyRequestRef.current = null
+      completedTodayRequestRef.current = null
       controller.abort()
       document.removeEventListener('visibilitychange', handleVisibilityChange)
       if (boundaryTimerId !== undefined) window.clearTimeout(boundaryTimerId)
     }
-  }, [fetchCurrentHourlyTrend, fetchMissingCompletedHourlyTrends, fetchPreviousHourlyTrend, fetchWeeklyTrends])
+  }, [fetchCompletedTodayTrends, fetchCurrentHourlyTrend, fetchPreviousHourlyTrend, fetchWeeklyTrends])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    void fetchChannelSpend(controller.signal)
+    return () => controller.abort()
+  }, [fetchChannelSpend])
 
   // 获取系统规模信息（仅首次加载）
   const fetchSystemInfo = useCallback(async () => {
@@ -584,7 +632,6 @@ export function Dashboard() {
 
     const loadData = async () => {
       setLoadError(null)
-      setLoading(true)
 
       const timeoutId = window.setTimeout(() => {
         if (mounted) setLoadError('仪表盘加载超时，请稍后重试（可能是数据库负载过高）')
@@ -592,10 +639,12 @@ export function Dashboard() {
       }, requestTimeoutMs)
 
       try {
-        await fetchAll(false, controller.signal)
+        const ok = await fetchAll(false, controller.signal)
+        if (!ok && mounted && !controller.signal.aborted) {
+          setLoadError('部分数据加载失败，可重试缺失内容')
+        }
       } finally {
         window.clearTimeout(timeoutId)
-        if (mounted) setLoading(false)
       }
     }
     loadData()
@@ -750,26 +799,6 @@ export function Dashboard() {
 
   const getPeriodLabel = () => period === 'today' ? '当天' : period === 'week' ? '本周' : '本月'
 
-  if (loading) {
-    return (
-      <div className="flex justify-center items-center py-40">
-        <Loader2 className="h-12 w-12 animate-spin text-primary" />
-      </div>
-    )
-  }
-
-  if (loadError) {
-    return (
-      <div className="flex flex-col items-center justify-center py-40 gap-4">
-        <p className="text-sm text-muted-foreground text-center max-w-md">{loadError}</p>
-        <Button variant="outline" onClick={handleRetry} disabled={refreshing}>
-          <RefreshCw className={cn("h-4 w-4 mr-2", refreshing && "animate-spin")} />
-          {refreshing ? '重试中...' : '重试'}
-        </Button>
-      </div>
-    )
-  }
-
   return (
     <div className="space-y-8 animate-in fade-in duration-500">
       {/* 大型系统刷新确认对话框 */}
@@ -911,6 +940,16 @@ export function Dashboard() {
         </div>
       </div>
 
+      {loadError && (
+        <div className="flex flex-col gap-3 border-y border-amber-200 bg-amber-50/70 px-4 py-3 text-sm text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/20 dark:text-amber-200 sm:flex-row sm:items-center sm:justify-between" role="alert">
+          <span>{loadError}</span>
+          <Button variant="outline" size="sm" onClick={handleRetry} disabled={refreshing} className="self-start sm:self-auto">
+            <RefreshCw className={cn("mr-2 h-4 w-4", refreshing && "animate-spin")} />
+            {refreshing ? '重试中...' : '重试'}
+          </Button>
+        </div>
+      )}
+
       {/* System Overview Section */}
       <section className="space-y-4">
         <h3 className="text-lg font-semibold flex items-center gap-2">
@@ -924,6 +963,7 @@ export function Dashboard() {
             subValue={`${overview?.active_users || 0} 活跃(${getPeriodLabel()})`}
             icon={Users}
             color="blue"
+            loading={!overview}
           />
           <StatCard
             title="令牌总数"
@@ -931,6 +971,7 @@ export function Dashboard() {
             subValue={`${overview?.active_tokens || 0} 活跃(${getPeriodLabel()})`}
             icon={Key}
             color="emerald"
+            loading={!overview}
           />
           <StatCard
             title="渠道总数"
@@ -938,6 +979,7 @@ export function Dashboard() {
             subValue={`${overview?.active_channels || 0} 在线`}
             icon={Server}
             color="purple"
+            loading={!overview}
           />
           <StatCard
             title="模型数量"
@@ -945,6 +987,7 @@ export function Dashboard() {
             subValue="可用模型"
             icon={Box}
             color="orange"
+            loading={!overview}
           />
           <StatCard
             title="兑换码"
@@ -952,6 +995,7 @@ export function Dashboard() {
             subValue={`${overview?.unused_redemptions || 0} 未用`}
             icon={Ticket}
             color="pink"
+            loading={!overview}
           />
         </div>
       </section>
@@ -970,6 +1014,7 @@ export function Dashboard() {
             icon={BarChart3}
             color="indigo"
             variant="compact"
+            loading={!usage}
           />
           <StatCard
             title="消耗额度"
@@ -978,6 +1023,7 @@ export function Dashboard() {
             icon={Zap}
             color="amber"
             variant="compact"
+            loading={!usage}
           />
           <StatCard
             title="总 Token"
@@ -986,6 +1032,7 @@ export function Dashboard() {
             icon={Hash}
             color="purple"
             variant="compact"
+            loading={!usage}
           />
           <StatCard
             title="输入 Token"
@@ -994,6 +1041,7 @@ export function Dashboard() {
             icon={ArrowDownToLine}
             color="cyan"
             variant="compact"
+            loading={!usage}
           />
           <StatCard
             title="输出 Token"
@@ -1002,6 +1050,7 @@ export function Dashboard() {
             icon={ArrowUpFromLine}
             color="teal"
             variant="compact"
+            loading={!usage}
           />
           <StatCard
             title="平均响应"
@@ -1009,22 +1058,36 @@ export function Dashboard() {
             icon={Clock}
             color="rose"
             variant="compact"
+            loading={!usage}
           />
         </div>
       </section>
 
 
       {/* Spend Analytics — 当天按小时:上「每小时花费折线」+ 下「Token 组成堆叠柱」,共用小时横轴 */}
-      <SpendAnalytics
-        dailyTrends={dailyTrends}
-        loading={trendsLoading}
-      />
+      <Suspense fallback={<DashboardChartFallback height={548} />}>
+        <SpendAnalytics
+          dailyTrends={dailyTrends}
+          loading={trendsLoading}
+        />
+      </Suspense>
+
+      <Suspense fallback={<DashboardChartFallback height={430} />}>
+        <ChannelSpendComparison
+          data={channelSpendData}
+          days={channelSpendDays}
+          loading={channelSpendLoading}
+          onDaysChange={setChannelSpendDays}
+        />
+      </Suspense>
 
       {/* Weekly Pattern — 近4周按星期几:花费 / Token / 缓存命中率 三个子图,4条线对比周与周 */}
-      <WeeklyPatternAnalytics
-        dailyTrends={weeklyTrends}
-        loading={weeklyLoading}
-      />
+      <Suspense fallback={<DashboardChartFallback height={520} />}>
+        <WeeklyPatternAnalytics
+          dailyTrends={weeklyTrends}
+          loading={weeklyLoading}
+        />
+      </Suspense>
 
       {/* Analytics Kings */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -1037,6 +1100,7 @@ export function Dashboard() {
           value={analyticsSummary?.request_king?.request_count.toLocaleString()}
           gradient="from-blue-600 to-indigo-600"
           accentColor="text-blue-100"
+          loading={!analyticsLoaded}
         />
         <KingCard
           title="土豪榜首"
@@ -1047,6 +1111,7 @@ export function Dashboard() {
           value={analyticsSummary?.quota_king ? `$${(analyticsSummary.quota_king.quota_used / 500000).toFixed(2)}` : undefined}
           gradient="from-emerald-600 to-teal-600"
           accentColor="text-emerald-100"
+          loading={!analyticsLoaded}
         />
       </div>
     </div>
@@ -1054,6 +1119,17 @@ export function Dashboard() {
 }
 
 // --- Components ---
+
+function DashboardChartFallback({ height }: { height: number }) {
+  return (
+    <Card className="border-border/50 shadow-sm">
+      <CardContent className="p-6">
+        <div className="mb-6 h-8 w-48 animate-pulse rounded bg-muted/40" />
+        <div className="animate-pulse rounded-md bg-muted/20" style={{ height: height - 80 }} />
+      </CardContent>
+    </Card>
+  )
+}
 
 interface StatCardProps {
   title: string
@@ -1064,9 +1140,10 @@ interface StatCardProps {
   color: string
   variant?: 'default' | 'compact'
   customLabel?: string
+  loading?: boolean
 }
 
-function StatCard({ title, value, rawValue, subValue, icon: Icon, color, variant = 'default', customLabel }: StatCardProps) {
+function StatCard({ title, value, rawValue, subValue, icon: Icon, color, variant = 'default', customLabel, loading = false }: StatCardProps) {
   // Map color names to Tailwind classes
   const colorMap: Record<string, { bg: string, text: string, ring: string }> = {
     blue: { bg: 'bg-blue-50 text-blue-700 dark:bg-blue-950 dark:text-blue-300', text: 'text-blue-600', ring: 'group-hover:ring-blue-200' },
@@ -1094,12 +1171,16 @@ function StatCard({ title, value, rawValue, subValue, icon: Icon, color, variant
           <div className={cn("absolute -right-4 -top-4 w-16 h-16 rounded-full opacity-10 group-hover:opacity-20 transition-opacity duration-300 blur-xl", theme.bg.split(' ')[0])} />
           <div className="space-y-1 min-w-0 flex-1 mr-2 relative z-10">
             <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">{customLabel || title}</p>
-            <div
-              className={cn(fontSize, "font-bold tracking-tight cursor-default tabular-nums text-foreground/90")}
-              title={rawValue !== undefined ? rawValue.toLocaleString('zh-CN') : undefined}
-            >
-              {value}
-            </div>
+            {loading ? (
+              <div className="h-6 w-24 animate-pulse rounded bg-muted/50" />
+            ) : (
+              <div
+                className={cn(fontSize, "font-bold tracking-tight cursor-default tabular-nums text-foreground/90")}
+                title={rawValue !== undefined ? rawValue.toLocaleString('zh-CN') : undefined}
+              >
+                {value}
+              </div>
+            )}
           </div>
           <div className={cn("p-2 rounded-xl flex-shrink-0 transition-transform duration-300 group-hover:scale-110 shadow-sm relative z-10", theme.bg)}>
             <Icon className="w-4 h-4" />
@@ -1116,13 +1197,19 @@ function StatCard({ title, value, rawValue, subValue, icon: Icon, color, variant
         <div className="flex justify-between items-start relative z-10">
           <div className="space-y-2">
             <p className="text-sm font-medium text-muted-foreground">{title}</p>
-            <div className="text-2xl font-bold tracking-tight text-foreground/90">{value.toLocaleString()}</div>
+            {loading ? (
+              <div className="h-8 w-20 animate-pulse rounded bg-muted/50" />
+            ) : (
+              <div className="text-2xl font-bold tracking-tight text-foreground/90">{value.toLocaleString()}</div>
+            )}
           </div>
           <div className={cn("p-3 rounded-2xl transition-all duration-300 group-hover:scale-110 shadow-sm", theme.bg)}>
             <Icon className="w-5 h-5" />
           </div>
         </div>
-        {subValue && (
+        {loading ? (
+          <div className="mt-4 h-6 w-28 animate-pulse rounded-full bg-muted/40" />
+        ) : subValue && (
           <div className="mt-4 flex items-center text-xs relative z-10">
             <span className={cn("font-medium px-2.5 py-1 rounded-full bg-secondary/80 backdrop-blur-sm shadow-sm border border-black/5 dark:border-white/5", theme.text)}>
               {subValue}
@@ -1143,9 +1230,10 @@ interface KingCardProps {
   value: string | undefined
   gradient: string
   accentColor: string
+  loading?: boolean
 }
 
-function KingCard({ title, subtitle, icon: Icon, user, valueLabel, value, gradient, accentColor }: KingCardProps) {
+function KingCard({ title, subtitle, icon: Icon, user, valueLabel, value, gradient, accentColor, loading = false }: KingCardProps) {
   return (
     <div className={`glass-card bg-gradient-to-br ${gradient} rounded-2xl shadow-lg p-6 text-white relative overflow-hidden group hover:shadow-xl hover:-translate-y-1 transition-all duration-300 border border-white/20`}>
       {/* Background Pattern */}
@@ -1163,7 +1251,9 @@ function KingCard({ title, subtitle, icon: Icon, user, valueLabel, value, gradie
         </div>
       </div>
 
-      {user ? (
+      {loading ? (
+        <div className="mt-6 h-[172px] animate-pulse rounded-lg border border-white/10 bg-white/10" />
+      ) : user ? (
         <div className="mt-6 relative z-10">
           <div className="flex items-center bg-white/10 p-4 rounded-lg backdrop-blur-sm border border-white/10">
             <div className="h-12 w-12 rounded-full bg-white text-blue-600 flex items-center justify-center text-xl font-bold shadow-sm">

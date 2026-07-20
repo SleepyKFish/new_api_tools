@@ -1,8 +1,30 @@
-import { useState, useEffect } from 'react'
-import { Login, Layout, TabType, Generator, History, TopUps, Dashboard, Redemptions, Analytics, UserManagement, RealtimeRanking, IPAnalysis, ModelStatusMonitor, AutoGroup, Tokens } from './components'
+import { lazy, Suspense, useState, useEffect } from 'react'
+import { Login } from './components/Login'
+import { Layout, type TabType } from './components/Layout'
+import { Dashboard } from './components/Dashboard'
 import { useAuth } from './contexts/AuthContext'
 import { WarmupScreen } from './components/WarmupScreen'
 import { MOCK_MODE } from './lib/env'
+
+const Generator = lazy(() => import('./components/Generator').then(module => ({ default: module.Generator })))
+const History = lazy(() => import('./components/History').then(module => ({ default: module.History })))
+const TopUps = lazy(() => import('./components/TopUps').then(module => ({ default: module.TopUps })))
+const Redemptions = lazy(() => import('./components/Redemptions').then(module => ({ default: module.Redemptions })))
+const Analytics = lazy(() => import('./components/Analytics').then(module => ({ default: module.Analytics })))
+const UserManagement = lazy(() => import('./components/UserManagement').then(module => ({ default: module.UserManagement })))
+const RealtimeRanking = lazy(() => import('./components/RealtimeRanking').then(module => ({ default: module.RealtimeRanking })))
+const IPAnalysis = lazy(() => import('./components/IPAnalysis').then(module => ({ default: module.IPAnalysis })))
+const ModelStatusMonitor = lazy(() => import('./components/ModelStatusMonitor').then(module => ({ default: module.ModelStatusMonitor })))
+const AutoGroup = lazy(() => import('./components/AutoGroup').then(module => ({ default: module.AutoGroup })))
+const Tokens = lazy(() => import('./components/Tokens').then(module => ({ default: module.Tokens })))
+
+function PageLoadingFallback() {
+  return (
+    <div className="flex min-h-[320px] items-center justify-center">
+      <div className="h-9 w-9 animate-spin rounded-full border-4 border-primary/20 border-t-primary" />
+    </div>
+  )
+}
 
 // Valid tabs
 const validTabs: TabType[] = ['dashboard', 'topups', 'risk', 'ip-analysis', 'analytics', 'model-status', 'users', 'tokens', 'auto-group', 'generator', 'redemptions', 'history']
@@ -161,7 +183,9 @@ function App() {
 
   return (
     <Layout activeTab={activeTab} onTabChange={setActiveTab} onLogout={logout}>
-      {renderContent()}
+      <Suspense fallback={<PageLoadingFallback />}>
+        {renderContent()}
+      </Suspense>
     </Layout>
   )
 }
